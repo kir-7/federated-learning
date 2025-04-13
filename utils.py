@@ -93,7 +93,7 @@ def get_dataset(args):
     return train_dataset, test_dataset, user_groups
 
 
-def average_weights(w):
+def average_weights(w):    #rename to fed_avg
     """
     Returns the average of the weights.
     """
@@ -102,9 +102,15 @@ def average_weights(w):
         for i in range(1, len(w)):
             w_avg[key] += w[i][key]
         w_avg[key] = torch.div(w_avg[key], len(w))
+
     return w_avg
 
+
+# other algos 
 def fed_svrg(w):
+    pass
+
+def co_op(w):
     pass
 
 @torch.no_grad()
