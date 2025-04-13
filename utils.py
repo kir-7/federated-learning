@@ -131,7 +131,7 @@ def calc_accuracy(model, criterion, test_loader, device):
         correct += torch.sum(torch.eq(pred_labels, labels)).item()
         total += len(labels)
 
-    loss_avg = loss/len(testloader)
+    loss_avg = loss/len(test_loader)
 
     accuracy = correct/total
     return accuracy, loss_avg
