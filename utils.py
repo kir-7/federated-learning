@@ -29,6 +29,7 @@ class ARGS:
     momentum : float = 0.5
     unequal:int = 0 
     seed : int = 1 
+    n_clients:int=100
 
 def get_dataset(args):
     """ Returns train and test datasets and a user group which is a dict where

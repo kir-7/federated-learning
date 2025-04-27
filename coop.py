@@ -92,7 +92,7 @@ class Client:
 
 class Server:
     
-    def __init__(self, model, dataset, bl, bu, n_clients, sample, n_iter=30):
+    def __init__(self, model, sample, args, bl=16, bu=51, n_iter=30):
         
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"Server initialized using {self.device}")
@@ -105,10 +105,10 @@ class Server:
         _initial_model = self.model().cpu()
         self.model_state_dict_cpu = _initial_model.state_dict()
         
-        self.n_clients = n_clients
-        self.data_partition = sample(dataset, n_clients)
+        self.n_clients = args.n_clients
+        self.data_partition = sample(args)
 
-        self.clients =  [Client(deepcopy(self.model_state_dict_cpu), self.data_partition[i], i, self.get_model_age, self.get_bounds, self.get_model, self.UpdateServer) for i in range(n_clients)]  
+        self.clients =  [Client(deepcopy(self.model_state_dict_cpu), self.data_partition[i], i, self.get_model_age, self.get_bounds, self.get_model, self.UpdateServer) for i in range(self.n_clients)]  
         self.a = bl
 
         self.lock = threading.Lock()
@@ -175,7 +175,7 @@ class Server:
             for thr in threads:
                 thr.join()
                 pbar.update(1)
-                
+
         print("\n=== Client Results ===")        
         for client_id, result in client_results.items():
              if result:

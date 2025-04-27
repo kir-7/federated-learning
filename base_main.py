@@ -27,15 +27,7 @@ if __name__ == '__main__':
         elif args.dataset == 'fmnist':
             global_model = CNNFashion_Mnist(args=args)
         elif args.dataset == 'cifar':
-            global_model = CNNCifar(args=args)
-    elif args.model == 'mlp':
-        # Multi-layer preceptron
-        img_size = train_dataset[0][0].shape
-        len_in = 1
-        for x in img_size:
-            len_in *= x
-            global_model = MLP(dim_in=len_in, dim_hidden=64,
-                               dim_out=args.num_classes)
+            global_model = CNNCifar(args=args)    
     else:
         exit('Error: unrecognized model')
 

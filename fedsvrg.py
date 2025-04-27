@@ -87,15 +87,16 @@ class Client:
 
 
 class Server:
-    def __init__(self, model, dataset, n_clients, sample):
+    def __init__(self, model, sample, args):
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         self.model = model.to(self.device)
-        self.n_clients = n_clients
-        self.data_partition = sample(dataset, n_clients)
+        self.n_clients = args.n_clienst
 
-        self.clients =  [Client(deepcopy(model), self.data_partition[i], i) for i in range(n_clients)]  
+        self.data_partition = sample(args)
+
+        self.clients =  [Client(deepcopy(model), self.data_partition[i], i) for i in range(self.n_clients)]  
 
         self.epochs = 10      
         self.lr = 1e-2
