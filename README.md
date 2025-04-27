@@ -6,4 +6,6 @@
 * __Kireeti__ : run the new datasets, models, algos and aggregate the results.
 
 
+For FedSVRG the input is the dataset, the model and a sampler function that is used to partition the given dataset for each client, depending on technique(iit, non iid)  
+
     

@@ -105,14 +105,6 @@ def average_weights(w):    #rename to fed_avg
 
     return w_avg
 
-
-# other algos 
-def fed_svrg(w):
-    pass
-
-def co_op(w):
-    pass
-
 @torch.no_grad()
 def calc_accuracy(model, criterion, test_loader, device):
     
