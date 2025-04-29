@@ -22,7 +22,7 @@ class ARGS:
     num_users : int = 100
     local_bs: int = 10
     local_ep : int = 10
-    dataset : str = 'cifar'
+    dataset : str = 'cancer'
     num_classes :int=10
     gpu : bool = False
     verbose=False
@@ -36,23 +36,37 @@ def get_dataset(args):
     the keys are the user index and the values are the corresponding data for
     each of those users.
     """
+    if args.dataset == 'cancer':
+        
 
-    if args.dataset == 'cifar':
-        data_dir = '../data/cifar/'
-        apply_transform = transforms.Compose(
-            [transforms.ToTensor(),
-             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
+        # data transformation 
+        mean = [0.485, 0.456, 0.406]
+        std = [0.229, 0.224, 0.225]
+        composed_train = transforms.Compose([
+                                    transforms.Resize((224, 224)),
+                                    transforms.RandomHorizontalFlip(),
+                                    transforms.RandomRotation(degrees=5),
+                                    transforms.ToTensor(),
+                                    transforms.Normalize(mean, std)
+                                    ])
 
-        train_dataset = datasets.CIFAR10(data_dir, train=True, download=True,
-                                       transform=apply_transform)
+        # this transformation is for valiadationa and test sets
+        composed= transforms.Compose([
+                                    transforms.Resize((224, 224)),
+                                    transforms.ToTensor(),
+                                    transforms.Normalize(mean, std)
+                                    ])
 
-        test_dataset = datasets.CIFAR10(data_dir, train=False, download=True,
-                                      transform=apply_transform)
+        data_dir = data_dir = "./"
+        dataset_full = cancer_dataset(data_dir, transform=composed)
+        
+        # Create a subset with just the first 4000 samples using slicing
+        dataset = dataset_full[:4000]
 
         # sample training data amongst users
         if args.iid:
             # Sample IID user data from Mnist
-            user_groups = cifar_iid(train_dataset, args.num_users)
+            user_groups = breast_cancer_iid(dataset, args.num_users)
         else:
             # Sample Non-IID user data from Mnist
             if args.unequal:
@@ -60,8 +74,9 @@ def get_dataset(args):
                 raise NotImplementedError()
             else:
                 # Chose euqal splits for every user
-                user_groups = cifar_noniid(train_dataset, args.num_users)
-
+                user_groups = breast_cancer_noniid(dataset, args.num_users)
+                
+    
     elif args.dataset == 'mnist' or 'fmnist':
         if args.dataset == 'mnist':
             data_dir = '../data/mnist/'
@@ -91,7 +106,7 @@ def get_dataset(args):
                 # Chose euqal splits for every user
                 user_groups = mnist_noniid(train_dataset, args.num_users)
 
-    return train_dataset, test_dataset, user_groups
+    return user_groups
 
 
 def average_weights(w):    #rename to fed_avg
