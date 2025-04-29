@@ -1,8 +1,9 @@
 import torch
 from torchvision import datasets, transforms
 from sampling import mnist_iid, mnist_noniid, mnist_noniid_unequal
-from sampling import cifar_iid, cifar_noniid, cancer_dataset, breast_cancer_iid, breast_cancer_noniid
+from sampling import cifar_iid, cifar_noniid
 from dataclasses import dataclass
+
 
 @dataclass
 class ARGS:
@@ -21,7 +22,7 @@ class ARGS:
     num_users : int = 100
     local_bs: int = 10
     local_ep : int = 10
-    dataset : str = 'cifar'
+    dataset : str = 'cancer'
     num_classes :int=10
     gpu : bool = False
     verbose=False
@@ -34,34 +35,19 @@ def get_dataset(args):
     """ Returns train and test datasets and a user group which is a dict where
     the keys are the user index and the values are the corresponding data for
     each of those users.
-    """ 
+    """
 
-    if args.dataset == 'cancer':
-        
+    if args.dataset == 'cifar':
+        data_dir = '../data/cifar/'
+        apply_transform = transforms.Compose(
+            [transforms.ToTensor(),
+             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
 
-        # data transformation 
-        mean = [0.485, 0.456, 0.406]
-        std = [0.229, 0.224, 0.225]
-        composed_train = transforms.Compose([
-                                    transforms.Resize((224, 224)),
-                                    transforms.RandomHorizontalFlip(),
-                                    transforms.RandomRotation(degrees=5),
-                                    transforms.ToTensor(),
-                                    transforms.Normalize(mean, std)
-                                    ])
+        train_dataset = datasets.CIFAR10(data_dir, train=True, download=True,
+                                       transform=apply_transform)
 
-        # this transformation is for valiadationa and test sets
-        composed= transforms.Compose([
-                                    transforms.Resize((224, 224)),
-                                    transforms.ToTensor(),
-                                    transforms.Normalize(mean, std)
-                                    ])
-
-        data_dir = data_dir = "./"
-        dataset_full = cancer_dataset(data_dir, transform=composed)
-        
-        # Create a subset with just the first 4000 samples using slicing
-        dataset = dataset_full[:4000]
+        test_dataset = datasets.CIFAR10(data_dir, train=False, download=True,
+                                      transform=apply_transform)
 
         # sample training data amongst users
         if args.iid:
@@ -74,8 +60,7 @@ def get_dataset(args):
                 raise NotImplementedError()
             else:
                 # Chose euqal splits for every user
-                user_groups = breast_cancer_noniid(dataset, args.num_users)
-
+                user_groups = cifar_noniid(train_dataset, args.num_users)
 
     elif args.dataset == 'mnist' or 'fmnist':
         if args.dataset == 'mnist':
