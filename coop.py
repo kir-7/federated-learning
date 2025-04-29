@@ -6,7 +6,7 @@ import threading
 import math
 import time
 from tqdm.auto import tqdm
-class Client:
+class CooPClient:
     def __init__(self, model, dataset, client_id, get_model_age, get_bounds, get_model, update_server, epochs= 10, lr=3e-4, bs=32):
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else 'cpu')
@@ -90,7 +90,7 @@ class Client:
         print(f"Client {self.client_id} completed training with final loss: {loss:.4f}")
         return self.client_id, loss
 
-class Server:
+class CooPServer:
     
     def __init__(self, model, sample, args, bl=16, bu=51, n_iter=30):
         
@@ -108,7 +108,7 @@ class Server:
         self.n_clients = args.n_clients
         self.data_partition = sample(args)
 
-        self.clients =  [Client(deepcopy(self.model_state_dict_cpu), self.data_partition[i], i, self.get_model_age, self.get_bounds, self.get_model, self.UpdateServer) for i in range(self.n_clients)]  
+        self.clients =  [CooPClient(deepcopy(self.model_state_dict_cpu), self.data_partition[i], i, self.get_model_age, self.get_bounds, self.get_model, self.UpdateServer) for i in range(self.n_clients)]  
         self.a = bl
 
         self.lock = threading.Lock()

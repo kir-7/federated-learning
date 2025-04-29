@@ -4,7 +4,7 @@ from torch.nn import functional as F
 
 from copy import deepcopy
 
-class Client:
+class FedSVRGClient:
     def __init__(self, model, dataset, client_id):
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else 'cpu')
@@ -86,7 +86,7 @@ class Client:
 
 
 
-class Server:
+class FedSVRGServer:
     def __init__(self, model, sample, args):
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -96,7 +96,7 @@ class Server:
 
         self.data_partition = sample(args)
 
-        self.clients =  [Client(deepcopy(model), self.data_partition[i], i) for i in range(self.n_clients)]  
+        self.clients =  [FedSVRGClient(deepcopy(model), self.data_partition[i], i) for i in range(self.n_clients)]  
 
         self.epochs = 10      
         self.lr = 1e-2
@@ -114,21 +114,29 @@ class Server:
         return [p/self.n_clients for p in full_grads]            
 
     def train(self):
-
-        client_models = []
-
+        
         for epoch in range(self.epochs):
-
+            print(f"\nEpoch {epoch+1}/{self.epochs}")
+            
             full_gradients = self.compute_full_gradient()
-
+            
+            client_models = []
+            
             for i, client in enumerate(self.clients):
+                client.set_global_weights(self.model.state_dict())
                 
-                lr = self.lr/len(self.data_partition[i])
-
-                c_model = client.local_update(full_gradients, lr)
-                client_models.append(c_model)
-
+                lr = self.lr / len(self.data_partition[i])
+                client_model = client.local_update(full_gradients, lr)
+                client_models.append(client_model)
+            
             self._aggregate_models(client_models)
+            
+            if hasattr(self, 'evaluate'):
+                accuracy = self.evaluate()
+                print(f"Epoch {epoch+1} - Global model accuracy: {accuracy:.4f}")
+        
+        print("\nTraining completed!")
+        return self.model.state_dict()
     
     def _aggregate_models(self, client_models):
         

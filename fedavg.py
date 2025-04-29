@@ -6,7 +6,7 @@ import numpy as np
 from tqdm import tqdm
 import time
 
-class Client:
+class FedAVGClient:
     def __init__(self, model, dataset, client_id, epochs=10, lr=0.01, bs=32):
         self.device = torch.device("cuda" if torch.cuda.is_available() else 'cpu')
         print(f"Client {client_id} initialized using {self.device}")
@@ -23,12 +23,12 @@ class Client:
 
     def train_val_test(self, dataset):
         n_samples = len(dataset)
-        train_data = dataset[:int(0.8*n_samples)]
-        val_data = dataset[int(0.8*n_samples):int(0.9*n_samples)]
-        test_data = dataset[int(0.9*n_samples):]
+        train_data = dataset[:int(0.8*n_samples)] 
+        val_data = dataset[int(0.8*n_samples):int(0.9*n_samples)] 
+        test_data = dataset[int(0.9*n_samples):]  
 
-        trainloader = DataLoader(train_data,batch_size=self.bs, shuffle=True)
-        valloader = DataLoader(val_data, batch_size=self.bs, shuffle=False) 
+        trainloader = DataLoader(train_data, batch_size=self.bs, shuffle=True)
+        valloader = DataLoader(val_data, batch_size=self.bs, shuffle=False)
         testloader = DataLoader(test_data, batch_size=self.bs, shuffle=False)
         return trainloader, valloader, testloader
     
@@ -80,26 +80,28 @@ class Client:
         print(f"Client {self.client_id} test - Accuracy: {accuracy:.2f}%, Loss: {avg_loss:.4f}")
         return accuracy, avg_loss
 
-class Server:
-    def __init__(self, model, sample, args, n_rounds=10, frac=1.0):
+class FedAVGServer:
+    def __init__(self, model, sample_func, args, n_rounds=10, frac=1.0):
+       
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"Server initialized using {self.device}")
         
-        # Initialize global model
         self.model = copy.deepcopy(model).to(self.device)
         print("Global model structure:")
         print(self.model)
 
-        self.args = args        
-        self.data_partition = sample(args)
+        self.args = args
+       
+        self.data_partition = sample_func(args)  
 
         self.n_rounds = n_rounds
-        self.frac = frac  
+        self.frac = frac
+        self.n_clients = args.n_clients 
 
         print(f"Creating {args.n_clients} clients")
         self.clients = []
         for i in range(args.n_clients):
-            client = Client(model, self.data_partition[i], i)
+            client = FedAVGClient(model, self.data_partition[i], i)
             self.clients.append(client)
             
         print(f"Server setup complete. Ready for {n_rounds} rounds of training")
