@@ -8,6 +8,7 @@ import torchvision.transforms as transforms
 import numpy as np 
 import pandas as pd
 import os
+from PIL import Image
 
 
 def mnist_iid(dataset, num_users):
@@ -144,59 +145,94 @@ def mnist_noniid_unequal(dataset, num_users):
 
     return dict_users
 
-class HS_Dataset(Dataset):
-    
-    def __init__(self, csv_file, root_dir, transform = None):
-        self.df = pd.read_csv(csv_file)
-        self.dir = root_dir
-        self.transform = transform
+class cancer_dataset(Dataset):
+    def _init_(self, data_dir, transform, dataset_type=None, max_samples=None):
+        # Get the path to the directory containing the images
+        path2data = os.path.join(data_dir, "data_sample/data_sample")
         
-    def __len__(self):
-        return len(self.df)
-    
-    def __getitem__(self, i):
-        """This function should return the ith example from the training set.
-        The example should be returned in the form of a dictionary: 
-        {'image': image_data, 'label': label_data}"""
-        
-        file = df['id'][i]
-        
-        label = np.array(df['label'][i])
-        if label == 0:
-            label == 0.0
-        else:
-            label == 1.0
-            
-        """Reshape needed to make the output of shape [1]"""
-        label = label.reshape((1))
+        # Get a list of the filenames of the images in the directory
+        filenames = os.listdir(path2data)
 
-        image = Image.open("../input/train/" + file + ".tif")
-        image = np.array(image.getdata()).reshape(96, 96, 3)
-        
-        sample = {'image': image, 'label': label}
-        
-        if self.transform:
-            sample = self.transform(sample)
+        # Get the full path to each image
+        full_filenames = [os.path.join(path2data, f) for f in filenames]
+
+        # Load the labels from a CSV file
+        path2labels = os.path.join(data_dir, "labels.csv")
+        labels_df = pd.read_csv(path2labels)
+
+        # Set the "id" column as the index for the labels dataframe
+        labels_df.set_index("id", inplace=True)
+
+        # Extract all labels first
+        all_labels = [labels_df.loc[filename[:-4]].values[0] for filename in filenames]
+
+        # Obtain the labels for the dataset
+        if dataset_type=="train":
+            # Only use a subset of the images for training
+            # Ensure we slice both arrays at the same indices
+            self.full_filenames = full_filenames[:2608]
+            self.labels = all_labels[:2608]  # Use the same index for consistency
+            print("training dataset")
             
-        return sample
+        elif dataset_type=="val":
+            # Only use a subset of the images for validation
+            # Ensure we slice both arrays at the same indices
+            start_idx, end_idx = 3508, 3648
+            self.full_filenames = full_filenames[start_idx:end_idx]
+            self.labels = all_labels[start_idx:end_idx]  # Use the same indices
+            print("validation dataset")
+            
+        elif dataset_type=="test":
+            # Only use a subset of the images for testing
+            start_idx = 3648
+            self.full_filenames = full_filenames[start_idx:-1]
+            self.labels = all_labels[start_idx:-1]  # Use the same indices
+            print("testing dataset")
+            
+        else:
+            # Use all the images for the dataset
+            self.full_filenames = full_filenames
+            self.labels = all_labels
         
-        
-class ToTensor(object):
-    
-    def __call__(self, sample):
-        image, label = sample['image'], sample['label']
-        """This transposition is very important as PyTorch take in the image data in the current shape:
-        Number of Channels, Height, Width; So the third axis(channels) in the original image has to 
-        be made the first axis."""
-        image = image.transpose(2, 0, 1)        
-        image = torch.from_numpy(image)
-        image = image.type(torch.FloatTensor)
-        
-        label = torch.from_numpy(label)
-        label = label.type(torch.FloatTensor)
-        """The optimizer takes in FloatTensor type data. Hence the data has to be converted from any other format
-        to FloatTensor type"""
-        return {'image': image, 'label': label}
+        # Apply max_samples limit if specified
+        if max_samples is not None and max_samples < len(self.full_filenames):
+            self.full_filenames = self.full_filenames[:max_samples]
+            self.labels = self.labels[:max_samples]
+
+        # Save the data transformation to be applied to each image
+        self.transform = transform
+
+    def _len_(self):
+        # Return the size of the dataset (i.e., the number of images)
+        return len(self.full_filenames)
+
+    def _getitem_(self, idx):
+        # Handle both integer indexing and slicing
+        if isinstance(idx, slice):
+            # Create a new dataset with the sliced data
+            subset = cancer_dataset._new_(cancer_dataset)
+            
+            # Copy all attributes from self
+            for attr, value in self._dict_.items():
+                setattr(subset, attr, value)
+            
+            # Apply the slice to filenames and labels
+            start, stop, step = idx.indices(len(self))
+            indices = list(range(start, stop, step))
+            subset.full_filenames = [self.full_filenames[i] for i in indices]
+            subset.labels = [self.labels[i] for i in indices]
+            
+            return subset
+        else:
+            # Handle regular integer indexing
+            # Open the image file and apply the data transformation
+            img = Image.open(self.full_filenames[idx]) # PIL image
+            img = self.transform(img)
+            
+            # Return the transformed image along with its label
+            return img, self.labels[idx]
+
+
 
 def breast_cancer_iid(dataset, num_users):
     num_items = int(len(dataset) / num_users)
@@ -226,52 +262,6 @@ def breast_cancer_noniid(dataset, num_users):
         for rand in rand_set:
             dict_users[i] = np.concatenate(
                 (dict_users[i], idxs[rand * num_imgs:(rand + 1) * num_imgs]), axis=0)
-    return dict_users
-
-
-
-def cifar_iid(dataset, num_users):
-    """
-    Sample I.I.D. client data from CIFAR10 dataset
-    :param dataset:
-    :param num_users:
-    :return: dict of image index
-    """
-    num_items = int(len(dataset)/num_users)
-    dict_users, all_idxs = {}, [i for i in range(len(dataset))]
-    for i in range(num_users):
-        dict_users[i] = set(np.random.choice(all_idxs, num_items,
-                                             replace=False))
-        all_idxs = list(set(all_idxs) - dict_users[i])
-    return dict_users
-
-
-def cifar_noniid(dataset, num_users):
-    """
-    Sample non-I.I.D client data from CIFAR10 dataset
-    :param dataset:
-    :param num_users:
-    :return:
-    """
-    num_shards, num_imgs = 200, 250
-    idx_shard = [i for i in range(num_shards)]
-    dict_users = {i: np.array([]) for i in range(num_users)}
-    idxs = np.arange(num_shards*num_imgs)
-    # labels = dataset.train_labels.numpy()
-    labels = np.array(dataset.train_labels)
-
-    # sort labels
-    idxs_labels = np.vstack((idxs, labels))
-    idxs_labels = idxs_labels[:, idxs_labels[1, :].argsort()]
-    idxs = idxs_labels[0, :]
-
-    # divide and assign
-    for i in range(num_users):
-        rand_set = set(np.random.choice(idx_shard, 2, replace=False))
-        idx_shard = list(set(idx_shard) - rand_set)
-        for rand in rand_set:
-            dict_users[i] = np.concatenate(
-                (dict_users[i], idxs[rand*num_imgs:(rand+1)*num_imgs]), axis=0)
     return dict_users
 
 
