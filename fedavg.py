@@ -23,12 +23,12 @@ class Client:
 
     def train_val_test(self, dataset):
         n_samples = len(dataset)
-        train_data = dataset[:int(0.8*len(n_samples))]
-        val_data = dataset[int(0.8*len(n_samples)):int(0.9*len(n_samples))]
-        test_data = dataset[int(0.9*len(n_samples)):]
+        train_data = dataset[:int(0.8*n_samples)]
+        val_data = dataset[int(0.8*n_samples):int(0.9*n_samples)]
+        test_data = dataset[int(0.9*n_samples):]
 
         trainloader = DataLoader(train_data,batch_size=self.bs, shuffle=True)
-        valloader = DataLoader(val_data, batch_size=self.bs, shuffle=False)
+        valloader = DataLoader(val_data, batch_size=self.bs, shuffle=False) 
         testloader = DataLoader(test_data, batch_size=self.bs, shuffle=False)
         return trainloader, valloader, testloader
     
