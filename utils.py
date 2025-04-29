@@ -2,8 +2,9 @@ import copy
 import torch
 from torchvision import datasets, transforms
 from sampling import mnist_iid, mnist_noniid, mnist_noniid_unequal
-from sampling import cifar_iid, cifar_noniid
+from smapling import cancer_dataset, breast_cancer_iid, breast_cancer_noniid
 from dataclasses import dataclass
+
 
 @dataclass
 class ARGS:
