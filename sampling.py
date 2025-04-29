@@ -2,6 +2,13 @@
 import numpy as np
 from torchvision import datasets, transforms
 
+from torch.utils.data import Dataset, DataLoader
+from torch.utils.data.sampler import Sampler
+import torchvision.transforms as transforms
+import numpy as np 
+import pandas as pd
+import os
+
 
 def mnist_iid(dataset, num_users):
     """
@@ -136,6 +143,60 @@ def mnist_noniid_unequal(dataset, num_users):
                     axis=0)
 
     return dict_users
+
+class HS_Dataset(Dataset):
+    
+    def __init__(self, csv_file, root_dir, transform = None):
+        self.df = pd.read_csv(csv_file)
+        self.dir = root_dir
+        self.transform = transform
+        
+    def __len__(self):
+        return len(self.df)
+    
+    def __getitem__(self, i):
+        """This function should return the ith example from the training set.
+        The example should be returned in the form of a dictionary: 
+        {'image': image_data, 'label': label_data}"""
+        
+        file = df['id'][i]
+        
+        label = np.array(df['label'][i])
+        if label == 0:
+            label == 0.0
+        else:
+            label == 1.0
+            
+        """Reshape needed to make the output of shape [1]"""
+        label = label.reshape((1))
+
+        image = Image.open("../input/train/" + file + ".tif")
+        image = np.array(image.getdata()).reshape(96, 96, 3)
+        
+        sample = {'image': image, 'label': label}
+        
+        if self.transform:
+            sample = self.transform(sample)
+            
+        return sample
+        
+        
+class ToTensor(object):
+    
+    def __call__(self, sample):
+        image, label = sample['image'], sample['label']
+        """This transposition is very important as PyTorch take in the image data in the current shape:
+        Number of Channels, Height, Width; So the third axis(channels) in the original image has to 
+        be made the first axis."""
+        image = image.transpose(2, 0, 1)        
+        image = torch.from_numpy(image)
+        image = image.type(torch.FloatTensor)
+        
+        label = torch.from_numpy(label)
+        label = label.type(torch.FloatTensor)
+        """The optimizer takes in FloatTensor type data. Hence the data has to be converted from any other format
+        to FloatTensor type"""
+        return {'image': image, 'label': label}
 
 def breast_cancer_iid(dataset, num_users):
     num_items = int(len(dataset) / num_users)
