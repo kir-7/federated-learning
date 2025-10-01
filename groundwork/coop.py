@@ -17,10 +17,9 @@ class CooPClient:
         self.split = 0.8
         self.lr = lr
         self.bs = bs
-        self.trainloader, self.valloader = self.train_val(dataset)
+        self.trainloader = DataLoader(dataset, batch_size=self.bs, shuffle=True, drop_last=True)
         print(f"Client {client_id} training data: {len(self.trainloader.dataset)} samples")
         
-
         # Default criterion set to NLL loss function
         self.criterion = nn.NLLLoss().to(self.device)
 
@@ -32,14 +31,6 @@ class CooPClient:
         self.get_bounds = get_bounds
         self.update_server = update_server
 
-    def train_val(self,dataset):
-        num_samples = len(dataset)
-        train_samples = int(self.split*num_samples)
-
-        train_loader = DataLoader(dataset[:train_samples], batch_size=self.bs, shuffle=True, drop_last=True)
-        val_loader = DataLoader(dataset[train_samples:], batch_size=self.bs, shuffle=False)
-        return train_loader, val_loader
-    
     def ClientUpdate(self):
         self.model.train()
         epoch_loss = []
@@ -82,7 +73,7 @@ class CooPClient:
 
             else:
                 print(f"Client {self.client_id}: Updating server (client age: {self.ak}, server age: {a})")                
-                new_w_cpu, new_a = self.update_server(wk_cpu, self.ak, self.client_id)
+                new_w_cpu, new_a = self.update_server(wk_cpu, self.ak)
                 new_w = {k: v.to(self.device) for k, v in new_w_cpu.items()}
                 self.model.load_state_dict(new_w)
                 self.ak = new_a
@@ -102,13 +93,12 @@ class CooPServer:
         print(f"Age bounds set to bl={bl}, bu={bu}")
 
         self.model = model.to(self.device)
-        _initial_model = self.model().cpu()
-        self.model_state_dict_cpu = _initial_model.state_dict()
+        self.model_state_dict_cpu = self.model.to('cpu').state_dict()
         
         self.n_clients = args.n_clients
-        self.data_partition = sample(args)
+        self.dataset, self.data_partition = sample(args)
 
-        self.clients =  [CooPClient(deepcopy(self.model_state_dict_cpu), self.data_partition[i], i, self.get_model_age, self.get_bounds, self.get_model, self.UpdateServer) for i in range(self.n_clients)]  
+        self.clients =  [CooPClient(deepcopy(self.model), self.data_partition[i], i, self.get_model_age, self.get_bounds, self.get_model, self.UpdateServer, epochs=args.local_ep, bs=args.local_bs, lr=args.lr) for i in range(self.n_clients)]  
         self.a = bl
 
         self.lock = threading.Lock()
@@ -149,7 +139,7 @@ class CooPServer:
             
             return deepcopy(new_sd_cpu), self.a
 
-    async def train(self):
+    def train(self):
 
         print("\n=== Starting Federated Training ===")
         print(f"Number of clients: {self.n_clients}")
@@ -179,7 +169,7 @@ class CooPServer:
         print("\n=== Client Results ===")        
         for client_id, result in client_results.items():
              if result:
-                 final_loss = result
+                 _, final_loss = result
                  print(f"Client {client_id} finished with final avg loss: {final_loss:.4f}")
              else:
                  print(f"Client {client_id} encountered an error.")
@@ -190,8 +180,3 @@ class CooPServer:
         print(f"Total Training Time: {toc-tic:.2f} seconds")
         
         return self.model_state_dict_cpu
-
-
-        
-
-
