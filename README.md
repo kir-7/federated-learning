@@ -15,3 +15,8 @@
 * Code can be found at ./fed_nidd/
 * Contributors - KK Kireeti, Fariz Sameer, Sri Teja.
 
+* Path is :-
+    - For Class label based Non IID:
+        - First implement clustering with K Means, and test out performance for both MNIST and Cifar10
+        - K Means causes an issue where some outlier that is grouped with a similar clients, will bringdown the overall performance of the cluster leading to poor performnce, so wee need a clustering algo where outliers will be their own cluster, so it should be a distance based clustering, and should a distance threshold.
+        - Testing with DBSCAN. 

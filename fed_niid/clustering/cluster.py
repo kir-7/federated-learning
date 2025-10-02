@@ -49,6 +49,14 @@ class FedClusterConfig:
     kmeans_max_iter: int = 300      # maximum iterations for K-Means
     kmeans_tol: float = 1e-4        # tolerance for K-Means convergence
     
+    # DBSCAN clustering parameters
+    dbscan_eps : float = 0.5
+    dbscan_min_samples : int = 3
+
+    # Agglomarative clustering parameters
+    use_agglomarative : bool = False
+    agglomarative_linkage : str = 'ward' 
+
     verbose: bool = True
 
 class FedCluster:
@@ -214,31 +222,47 @@ class FedCluster:
         feature_matrix = self.create_feature_matrix(distribution_stats)
         
         # Apply K-Means clustering
-        # kmeans = KMeans(
-        #     n_clusters=self.config.n_clusters,
-        #     init=self.config.kmeans_init,
-        #     max_iter=self.config.kmeans_max_iter,
-        #     tol=self.config.kmeans_tol,
-        #     random_state=self.config.np_seed,
-        #     n_init=10  # number of random initializations
-        # )
+        kmeans = KMeans(
+            n_clusters=self.config.n_clusters,
+            init=self.config.kmeans_init,
+            max_iter=self.config.kmeans_max_iter,
+            tol=self.config.kmeans_tol,
+            random_state=self.config.np_seed,
+            n_init=10  # number of random initializations
+        )
         
-        # self.labels_ = kmeans.fit_predict(feature_matrix)
-        # self.kmeans_model_ = kmeans  # Store the fitted model
-        # self.cluster_centers_ = kmeans.cluster_centers_  # Store cluster centers
-        # self.inertia_ = kmeans.inertia_  # Store within-cluster sum of squares
+        self.labels_ = kmeans.fit_predict(feature_matrix)
+        self.kmeans_model_ = kmeans  # Store the fitted model
+        self.cluster_centers_ = kmeans.cluster_centers_  # Store cluster centers
+        self.inertia_ = kmeans.inertia_  # Store within-cluster sum of squares
 
-        # if self.config.verbose:
-            # print(f"K-Means inertia (within-cluster sum of squares): {self.inertia_:.4f}")
-            # print(f"Cluster centers shape: {self.cluster_centers_.shape}")
+        if self.config.verbose:
+            print(f"K-Means inertia (within-cluster sum of squares): {self.inertia_:.4f}")
+            print(f"Cluster centers shape: {self.cluster_centers_.shape}")
 
         # Perform DBSCAN clustering
-        dbscan =  DBSCAN(eps=self.config.dbscan_eps, min_samples=self.config.dbscan_min_samples)
-        self.labels_ = dbscan.fit_predict(feature_matrix)
-        self.dbscan_model = dbscan        
+        # dbscan =  DBSCAN(eps=self.config.dbscan_eps, min_samples=self.config.dbscan_min_samples)
+        # self.labels_ = dbscan.fit_predict(feature_matrix)
+        # self.dbscan_model = dbscan        
         
         return self.labels_
-    
+
+    def create_agglomarative_clusters(self, distribution_stats):
+        '''
+        Create Clustering using Agglomarative clustering
+        '''
+        from sklearn.cluster import AgglomerativeClustering
+
+        
+        feature_matrix = self.create_feature_matrix(distribution_stats)
+
+        agglomarative_model = AgglomerativeClustering(linkage=self.config.agglomarative_linkage)
+        self.labels_ = agglomarative_model.fit_predict(feature_matrix)
+        self.agglomarative_model_ = agglomarative_model  # Store the fitted model
+
+        return self.labels_
+
+
     def assign_clusters_class_distribution(self):  
         '''
         assign each of n clients to p clusters
@@ -246,7 +270,7 @@ class FedCluster:
         '''
         
         distribution_stats = self.get_distribution_stats()
-        assigned_clusters = self.create_clusters(distribution_stats)
+        assigned_clusters = self.create_clusters(distribution_stats) if not self.config.use_agglomarative else self.create_agglomarative_clusters(distribution_stats)
         
         self.clusters = {i: [] for i in range(self.config.n_clusters)}
         
