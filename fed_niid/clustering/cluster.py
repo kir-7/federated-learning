@@ -55,7 +55,13 @@ class FedClusterConfig:
 
     # Agglomarative clustering parameters
     use_agglomarative : bool = False
-    agglomarative_linkage : str = 'ward' 
+    aggl_method : str = 'silhouette'
+    aggl_linkage : str = 'ward' 
+
+    # DBSCAN Parameters
+    dbscan_eps : float = 0.5
+    dbscan_min_samples : int = 2
+    use_dbscan : bool = False
 
     verbose: bool = True
 
@@ -73,9 +79,9 @@ class FedCluster:
         self.transforms = self.get_transforms()
         
         self.setup_dataset()
-        self.setup_models()
         self.assign_clusters_class_distribution()
-    
+        self.setup_models()
+        
     def get_transforms(self):
         # Correct normalization for CIFAR-10
         transform = transforms.Compose([
@@ -239,29 +245,58 @@ class FedCluster:
         if self.config.verbose:
             print(f"K-Means inertia (within-cluster sum of squares): {self.inertia_:.4f}")
             print(f"Cluster centers shape: {self.cluster_centers_.shape}")
-
-        # Perform DBSCAN clustering
-        # dbscan =  DBSCAN(eps=self.config.dbscan_eps, min_samples=self.config.dbscan_min_samples)
-        # self.labels_ = dbscan.fit_predict(feature_matrix)
-        # self.dbscan_model = dbscan        
+      
         
         return self.labels_
+
+    def create_dbscan_clustering(self, distribution_stats):
+        '''
+        Create Clusters using DBSCAN
+        '''
+        
+        feature_matrix = self.create_feature_matrix(distribution_stats)
+
+        dbs = DBSCAN(self.config.dbscan_eps, min_samples=self.config.dbscan_min_samples)
+
+        self.labels_ = dbs.fit_predict(feature_matrix)
+        self.dbs_model = dbs
+
+        count = max(self.labels_)+1
+
+        # all clients classified as noise will be their own clusters
+        for i in range(self.config.n_clients):
+            if self.labels_[i] == -1:
+                self.labels_[i] = count
+                count += 1        
+        
+        self.config.n_clusters = count
+
+        return self.labels_    
 
     def create_agglomarative_clusters(self, distribution_stats):
         '''
         Create Clustering using Agglomarative clustering
         '''
-        from sklearn.cluster import AgglomerativeClustering
-
+        from autoAgglo import AutoAgglomerativeClustering
+        from sklearn.preprocessing import StandardScaler
         
         feature_matrix = self.create_feature_matrix(distribution_stats)
+        scaler = StandardScaler()
 
-        agglomarative_model = AgglomerativeClustering(linkage=self.config.agglomarative_linkage)
-        self.labels_ = agglomarative_model.fit_predict(feature_matrix)
-        self.agglomarative_model_ = agglomarative_model  # Store the fitted model
+        feature_matrix_scaled = scaler.fit_transform(feature_matrix)
 
+        aggl_clusterer = AutoAgglomerativeClustering(
+            method=self.config.aggl_method,
+            linkage=self.config.aggl_linkage,
+            min_clusters=min(10, self.config.n_clusters),
+            max_clusters = min(10, self.config.n_clients-1)
+        )
+        
+        self.labels_ = aggl_clusterer.fit_predict(feature_matrix_scaled)
+        self.aggl_model = aggl_clusterer
+        self.config.n_clusters = max(self.labels_)+1
+        
         return self.labels_
-
 
     def assign_clusters_class_distribution(self):  
         '''
@@ -270,8 +305,13 @@ class FedCluster:
         '''
         
         distribution_stats = self.get_distribution_stats()
-        assigned_clusters = self.create_clusters(distribution_stats) if not self.config.use_agglomarative else self.create_agglomarative_clusters(distribution_stats)
-        
+        if self.config.use_agglomarative:
+            assigned_clusters = self.create_agglomarative_clusters(distribution_stats)
+        elif self.config.use_dbscan:
+                assigned_clusters = self.create_dbscan_clustering(distribution_stats)
+        else:
+            assigned_clusters = self.create_clusters(distribution_stats) 
+
         self.clusters = {i: [] for i in range(self.config.n_clusters)}
         
         for client in range(self.n_clients):
