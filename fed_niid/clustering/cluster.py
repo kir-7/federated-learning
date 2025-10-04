@@ -39,6 +39,8 @@ class FedClusterConfig:
     global_rounds: int = 10
     client_epochs: int = 5
     client_lr: float = 1e-4
+    step_size : int = 2
+    lr_schd_gamma = 0.5
     
     # seed
     torch_seed: int = 42
@@ -76,34 +78,55 @@ class FedCluster:
         self.n_clients = config.n_clients
         self.global_rounds = config.global_rounds
         
-        self.transforms = self.get_transforms()
+        self.train_transform, self.val_transform = self.get_transforms()
         
         self.setup_dataset()
         self.assign_clusters_class_distribution()
         self.setup_models()
         
     def get_transforms(self):
-        # Correct normalization for CIFAR-10
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)) if self.config.dataset == 'cifar10' else transforms.Normalize((0.1307,), (0.3081,))
+        
+        train_transform = transforms.Compose([
+            transforms.ToTensor(),            
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616]) if self.config.dataset == 'cifar10' else transforms.Normalize((0.1307,), (0.3081,))
         ])
-        return transform
+        
+        val_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616])  if self.config.dataset == 'cifar10' else transforms.Normalize((0.1307,), (0.3081,))
+        ])
+
+        return train_transform, val_transform
 
     
-    def apply_transforms(self, batch):
+    def apply_transforms_train(self, batch):
         if self.config.dataset == 'flwrlabs/femnist':
-            batch['img'] = [self.transforms(img.convert("L")) for img in batch['image']] # Convert to grayscale
+            batch['img'] = [self.train_transform(img.convert("L")) for img in batch['image']] # Convert to grayscale
             batch['label'] = batch['character']
             del batch['image']
             del batch['character']
         if self.config.dataset == 'mnist':
-            batch['img'] = [self.transforms(img) for img in batch['image']]
+            batch['img'] = [self.train_transform(img) for img in batch['image']]
             del batch['image']
         else:
-            batch['img'] = [self.transforms(img) for img in batch['img']]
+            batch['img'] = [self.train_transform(img) for img in batch['img']]
         return batch
     
+    def apply_transforms_test(self, batch):
+        if self.config.dataset == 'flwrlabs/femnist':
+            batch['img'] = [self.val_transform(img.convert("L")) for img in batch['image']] # Convert to grayscale
+            batch['label'] = batch['character']
+            del batch['image']
+            del batch['character']
+        if self.config.dataset == 'mnist':
+            batch['img'] = [self.val_transform(img) for img in batch['image']]
+            del batch['image']
+        else:
+            batch['img'] = [self.val_transform(img) for img in batch['img']]
+        return batch
+
     def setup_dataset(self):
         if self.config.method == 'dirichlet':
             self.partitioner = DirichletPartitioner(
@@ -139,8 +162,8 @@ class FedCluster:
                 train_indices = list(range(train_size))
                 test_indices = list(range(train_size, total_size))
                 
-                self.client_partitions_train[i] = full_partition.select(train_indices).with_transform(self.apply_transforms)
-                self.client_partitions_test[i] = full_partition.select(test_indices).with_transform(self.apply_transforms)
+                self.client_partitions_train[i] = full_partition.select(train_indices).with_transform(self.apply_transforms_train)
+                self.client_partitions_test[i] = full_partition.select(test_indices).with_transform(self.apply_transforms_test)
 
             all_test_data = []
             for i in range(self.config.n_clients):
@@ -152,7 +175,7 @@ class FedCluster:
             
             # Convert to dataset format for global test
             from datasets import Dataset
-            self.global_test_partition = Dataset.from_list(all_test_data).with_transform(self.apply_transforms)
+            self.global_test_partition = Dataset.from_list(all_test_data).with_transform(self.apply_transforms_test)
             
         else:
             fds = FederatedDataset(
@@ -165,16 +188,16 @@ class FedCluster:
             )
         
             self.client_partitions_train = {
-                i: fds.load_partition(i, "train").with_transform(self.apply_transforms) 
+                i: fds.load_partition(i, "train").with_transform(self.apply_transforms_train) 
                 for i in range(self.n_clients)
             }
             self.client_partitions_test = {
-                i: fds.load_partition(i, 'test').with_transform(self.apply_transforms)
+                i: fds.load_partition(i, 'test').with_transform(self.apply_transforms_test)
                 for i in range(self.n_clients)
             }
        
             # Load the global test partition for other datasets
-            self.global_test_partition = fds.load_split('test').with_transform(self.apply_transforms)
+            self.global_test_partition = fds.load_split('test').with_transform(self.apply_transforms_test)
         
         # Make this more flexible for different datasets
         self.all_labels = sorted(range(0, self.config.n_classes))  # TODO: make this dataset-dependent   
@@ -189,7 +212,7 @@ class FedCluster:
         if self.config.dataset == 'mnist' or self.config.dataset == 'flwrlabs/femnist':
             self.models = [MNISTModel(n_classes=self.config.n_classes).to(self.device) for _ in range(self.config.n_clusters)]
         else:
-            self.models = [ResnetModel(n_classes=self.config.n_classes).to(self.device) for _ in range(self.config.n_clusters)]        
+            self.models = [CIFAR10Model(n_classes=self.config.n_classes).to(self.device) for _ in range(self.config.n_clusters)]        
         self.criterion = nn.CrossEntropyLoss().to(self.device)
     
     def get_distribution_stats(self):
@@ -289,7 +312,7 @@ class FedCluster:
             method=self.config.aggl_method,
             linkage=self.config.aggl_linkage,
             min_clusters=min(10, self.config.n_clusters),
-            max_clusters = max(10, self.config.n_clients-1)
+            max_clusters = min(10, self.config.n_clients-1)
         )
         
         self.labels_ = aggl_clusterer.fit_predict(feature_matrix_scaled)
@@ -338,18 +361,25 @@ class FedCluster:
         if not local_models:
             return
             
-        weights = {}
+        # Get the state_dict of the first local model to initialize the average
+        avg_state_dict = deepcopy(local_models[0].state_dict())
         
-        for local_model in local_models:
-            for name, param in local_model.named_parameters():
-                if name not in weights:
-                    weights[name] = torch.zeros_like(param.data)
-                weights[name] += param.data
-        
-        # Update global model parameters
-        for name, param in global_model.named_parameters():
-            if name in weights:
-                param.data.copy_(weights[name] / len(local_models))
+        # Sum the state_dicts of all other models
+        for i in range(1, len(local_models)):
+            local_state_dict = local_models[i].state_dict()
+            for key in avg_state_dict:
+                avg_state_dict[key] += local_state_dict[key]
+                
+        # Average the state_dict
+        for key in avg_state_dict:
+            # Note: Tensors like 'num_batches_tracked' in BatchNorm should not be averaged.
+            # They are integers. We can just keep the one from the last model.
+            # A simple check for floating point type ensures we only average weights, biases, and running stats.
+            if avg_state_dict[key].dtype == torch.float32 or avg_state_dict[key].dtype == torch.float64:
+                avg_state_dict[key] = torch.div(avg_state_dict[key], len(local_models))
+
+        # Update the global model with the averaged state_dict
+        global_model.load_state_dict(avg_state_dict)
 
     @torch.inference_mode()
     def evaluate_global(self, models, dataloader):
@@ -466,6 +496,7 @@ class FedCluster:
     def train(self, client, model, dataloader):
         model.train()
         optimizer = torch.optim.Adam(model.parameters(), lr=self.config.client_lr, weight_decay=1e-4)
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=self.config.step_size, gamma=self.config.lr_schd_gamma)
         
         epoch_loss = []
         
@@ -485,10 +516,12 @@ class FedCluster:
                 
                 batch_loss.append(loss.item())
             
+            scheduler.step()
+            
             avg_loss = sum(batch_loss) / len(batch_loss) if batch_loss else 0
             epoch_loss.append(avg_loss)
         
-        return model.state_dict(), {
+        return model, {
             'avg_train_loss': sum(epoch_loss) / len(epoch_loss) if epoch_loss else 0,
             "train_loss": epoch_loss[-1] if epoch_loss else 0
         }
@@ -523,16 +556,13 @@ class FedCluster:
                 
                 # Train selected clients
                 for client in selected_clients:
-                    local_model_weights, train_res = self.train(
+                    local_trained_model, train_res = self.train(
                         client,
                         deepcopy(self.models[cl]), 
                         self.client_loaders_train[client]
                     )
-                    if self.config.dataset == 'mnist': local_model = MNISTModel().to(self.device)
-                    else:  local_model = ResnetModel(n_classes=self.config.n_classes).to(self.device)
-                        
-                    local_model.load_state_dict(local_model_weights)
-                    local_models.append(local_model)
+
+                    local_models.append(local_trained_model)
                     
                     result[f'client_{client}'] = train_res
                 
@@ -545,11 +575,6 @@ class FedCluster:
                         eval_res = self.evaluate(client, cl, self.models[cl], self.client_loaders_test[client])
                         result[f'client_{client}'].update(**eval_res)
                 
-                # Evaluate cluster on global test set
-                # this gives performance of each client on global test set which might include data from this cluster's distribution or not from it 
-                # cl_res = self.evaluate(None, cl, self.models[cl], self.global_test_loader)
-                # result[f'cluster_{cl}'] = cl_res
-                # now this is also part of evaluate_global
 
             # for each data sample in the global test set we obtain the highest probable class from each cluster and then pick the highest probable among those and verify it with ground truth
             eval_global_res = self.evaluate_global([self.models[i] for i in range(self.config.n_clusters)], self.global_test_loader)

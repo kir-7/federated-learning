@@ -27,10 +27,26 @@ class ResnetModel(nn.Module):
     def __init__(self, n_classes):
         super().__init__()
         self.model = resnet18(num_classes=n_classes)
-    
+        self.model.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+        self.model.maxpool = nn.Identity()
+
     def forward(self, x):
         return self.model(x)    
+    
+class ConvModel(torch.nn.Module):
+    def __init__(self):
+        super(ConvModel, self).__init__()
+        self.conv1 = torch.nn.Conv2d(1, 6, 5)
+        self.pool = torch.nn.MaxPool2d(2, 2)
+        self.conv2 = torch.nn.Conv2d(6, 16, 5)
+        self.fc1 = torch.nn.Linear(16 * 4 * 4, 62)
 
+    def forward(self, x):
+        x = self.pool(F.relu(self.conv1(x)))
+        x = self.pool(F.relu(self.conv2(x)))
+        x = x.view(-1, 16 * 4 * 4)
+        x = self.fc1(x)
+        return x
 
 class CIFAR10Model(nn.Module):
     def __init__(self, in_channels=3, n_classes=10):
@@ -38,18 +54,18 @@ class CIFAR10Model(nn.Module):
 
         self.n_classes = n_classes
 
-        # self.blocks = nn.ModuleList([
-        #     nn.Sequential(*[
-        #         Conv(in_channels, 32, 3, 2),    # /2
-        #         Conv(32, 64, 3, 2),    # /4
-        #         Conv(64, 128, 3, 1),   # /4
-        #     ]),
-        #     nn.Sequential(*[
-        #         Conv(128, 128, 3, 2),    # /8
-        #         Conv(128, 64, 3, 1),    # /8
-        #         Conv(64, 64, 3, 1),     # /8                
-        #     ])
-        # ])
+        self.blocks = nn.ModuleList([
+            nn.Sequential(*[
+                Conv(in_channels, 32, 3, 2),    # /2
+                Conv(32, 64, 3, 2),    # /4
+                Conv(64, 128, 3, 1),   # /4
+            ]),
+            nn.Sequential(*[
+                Conv(128, 128, 3, 2),    # /8
+                Conv(128, 64, 3, 1),    # /8
+                Conv(64, 64, 3, 1),     # /8                
+            ])
+        ])
 
         self.blocks = nn.Sequential(Conv(3, 32, 3, 2), Conv(32, 64, 3, 2), Conv(64, 128, 3, 1), Conv(128, 64, 3, 2))
 
@@ -59,8 +75,8 @@ class CIFAR10Model(nn.Module):
 
     def forward(self, x):
 
-        # for block in self.blocks:
-        #     x = block(x)        
+        for block in self.blocks:
+            x = block(x)        
 
         x = self.pool(x)
 

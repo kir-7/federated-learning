@@ -29,6 +29,13 @@
         - **Hypothesis:** When clustering is done, the method inherently makes it so that the clusters will have high class imbalance issue, so when we global eval: for a particular cluster the data point that doesn't belong to this cluster's data distribution will cause issues, but this should be taken care of by the other cluster to which this data point belongs to. On the other hand, when base FedAVG is used since there is one globa model and it sees all the classes it might perform better.  
         **Emperical Verification:** To verify this hypothesis, need to first get the component for m=0,4; 10 clusters; 60 clients, and for data point of each client need to verify the probability distribution for each cluster model and compare and see the cluster probability and win rates. 
 
+        - Another important thing is to test all these hypothesis on cifar10 dataset, as MNIST is a relatively simple dataset, it ois only for establishing the fact that the approach if applicable, not to test and consider the actual outputs
+
+        - While Evaluating for Cifar10, it was very frustrating as in all initial experiements the accuracy never crossed 15%, The issue was in BatchNormalizaion, when using CNN models, it is very common to use Normalization layers, but these layers shoudn't be aggregated as these layer's parameters(running mean, var) depend highly on the data that is fed into the model and averaging these parameters will cause model collapse and after only few iterations model will start to predict only one class for all images, so while aggregating client parameters batch norm weights should be ignored. So **BatchNorm layers are poisonous to federated learning**, which is obvious in hindsight, as majority implementations of fed lear found online don't use CNNs.   
+
+        - When experimenting on CIFAR10 dataset, base fed avg got 60% accuracy by 20 global epochs, and data distribution based clustering got similar performance. But when we evaluate different clusters performance and win rates, we notice that for some clusters the training doesn't seem to happen at all, and for cluster having only 1 client also doesn't seem to improve at all.
+
+
         - Partial Experiments can be found in __fed_niid/clustering/mnist__.
 
 
