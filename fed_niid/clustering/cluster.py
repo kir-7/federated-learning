@@ -289,7 +289,7 @@ class FedCluster:
             method=self.config.aggl_method,
             linkage=self.config.aggl_linkage,
             min_clusters=min(10, self.config.n_clusters),
-            max_clusters = min(10, self.config.n_clients-1)
+            max_clusters = max(10, self.config.n_clients-1)
         )
         
         self.labels_ = aggl_clusterer.fit_predict(feature_matrix_scaled)
