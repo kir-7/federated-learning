@@ -12,7 +12,7 @@
 
 * ### Class Skew Non IID distribution
     - We create Non IID datasets through Dirichlet distribution by adjusting alpha (0=non iid; ∞=iid)
-    - Use algorithms like KMeans, GMM, Agglomarative clustering to cluster clients based on the number of samples of each label a client has
+    - Use algorithms like KMeans, GMM, Agglomarative clustering to cluster clients based on the number of samples of each label a client has; so the feature vector of each data point(client) in the algorithm is the data distribution across all clases for that client.
 
 
     - #### Observations / Problems: 
@@ -31,12 +31,20 @@
 
         - Another important thing is to test all these hypothesis on cifar10 dataset, as MNIST is a relatively simple dataset, it ois only for establishing the fact that the approach if applicable, not to test and consider the actual outputs
 
-        - While Evaluating for Cifar10, it was very frustrating as in all initial experiements the accuracy never crossed 15%, The issue was in BatchNormalizaion, when using CNN models, it is very common to use Normalization layers, but these layers shoudn't be aggregated as these layer's parameters(running mean, var) depend highly on the data that is fed into the model and averaging these parameters will cause model collapse and after only few iterations model will start to predict only one class for all images, so while aggregating client parameters batch norm weights should be ignored. So **BatchNorm layers are poisonous to federated learning**, which is obvious in hindsight, as majority implementations of fed lear found online don't use CNNs.   
+        - While Evaluating for Cifar10, it was very frustrating as in all initial experiements the accuracy never crossed 15%, The issue was in BatchNormalizaion, when using CNN models, it is very common to use Normalization layers, but these layers shoudn't be aggregated as these layer's parameters(running mean, var) depend highly on the data that is fed into the model and averaging these parameters will cause model collapse and after only few iterations model will start to predict only one class for all images, so while aggregating client parameters batch norm weights should be ignored. So **BatchNorm layers are poisonous to federated learning**, which is obvious in hindsight, as majority implementations of fed learn found online don't use CNNs (mostly FCNs for MNIST, EMNIST, FEMNIST).   
 
-        - When experimenting on CIFAR10 dataset, base fed avg got 60% accuracy by 20 global epochs, and data distribution based clustering got similar performance. But when we evaluate different clusters performance and win rates, we notice that for some clusters the training doesn't seem to happen at all, and for cluster having only 1 client also doesn't seem to improve at all.
+        - When experimenting on CIFAR10 dataset, base fed avg got 60% accuracy by 20 global epochs, and data distribution based clustering got similar performance. But when we evaluate different clusters performance and win rates, it is seen that often times clustering is poor and that leads to lower cluster performance and win rates, can be improved with hyper-parameter tuning for clustering algorithm. In base fed avg case for 70% participation the best accuracy was 72% which is way better than clustering. Through experimentation it is seen that after training the cluster win rates and cluster accuracy are inconsistent; clusters with high accuracy are having lower win rates this shows that certain clusters that are generalizing well are predicting classes with lower probability, this might be due to the fact that is already mentioned: since clusters are formed based on class distribution clusters hav severe class imbalance, so clusters are over confidentally prediciting wrong classes. 
 
+        - There are multiple reasons for similar/low performance of this clustering approach:
+            * If we use Agglomarative clustering it leads to creation of multiple clusters for low number of clients, so this leads to less clients/cluster and less training on general, but in K-means approach, the clusters themselves have clients with pretty different distribution which might lead to poor performance, so for this FedProx might be better.
 
-        - Partial Experiments can be found in __fed_niid/clustering/mnist__.
+            * Each cluster becomes specialized in certain classes, so global evaluation strategy might require some changes where we weight the prediction probabilities based on cluster similarities.
+            
+            * Clusters themselves are independent so this doesn't fullfil the need for achieving global convergence required in FL, maybe optional frequent sharing of weights between clusters might be helpful (share onl deeper layer paramters).
+
+            * The clustering entirely depends on the initial data and doesn't consider model learnings, so a better approach would be to cluster based on model convergence, and so re-clustering can be used.       
+
+        - Partial Experiments can be found in __fed_niid/clustering/mnist & fed_niid/clustering/cifar10__.
 
 
 * ### Model Convergence based clustering:

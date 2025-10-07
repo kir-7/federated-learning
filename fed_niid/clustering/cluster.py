@@ -202,17 +202,17 @@ class FedCluster:
         # Make this more flexible for different datasets
         self.all_labels = sorted(range(0, self.config.n_classes))  # TODO: make this dataset-dependent   
 
-        self.client_loaders_train = { i: DataLoader(cp, batch_size=self.config.client_bs, shuffle=True) for i, cp in self.client_partitions_train.items() }
-        self.client_loaders_test = { i: DataLoader(cp, batch_size=self.config.client_bs, shuffle=False)  for i, cp in self.client_partitions_test.items() }
+        self.client_loaders_train = { i: DataLoader(cp, batch_size=self.config.client_bs, shuffle=True, num_workers=2, pin_memory=True) for i, cp in self.client_partitions_train.items() }
+        self.client_loaders_test = { i: DataLoader(cp, batch_size=self.config.client_bs, shuffle=False, num_workers=2, pin_memory=True)  for i, cp in self.client_partitions_test.items() }
         
-        self.global_test_loader = DataLoader(self.global_test_partition, batch_size=self.config.global_bs)
+        self.global_test_loader = DataLoader(self.global_test_partition, batch_size=self.config.global_bs, num_workers=2, pin_memory=True)
     
     def setup_models(self):
         # Create models for each cluster and move to device
         if self.config.dataset == 'mnist' or self.config.dataset == 'flwrlabs/femnist':
             self.models = [MNISTModel(n_classes=self.config.n_classes).to(self.device) for _ in range(self.config.n_clusters)]
         else:
-            self.models = [CIFAR10Model(n_classes=self.config.n_classes).to(self.device) for _ in range(self.config.n_clusters)]        
+            self.models = [ResnetModel(n_classes=self.config.n_classes).to(self.device) for _ in range(self.config.n_clusters)]        
         self.criterion = nn.CrossEntropyLoss().to(self.device)
     
     def get_distribution_stats(self):
@@ -383,11 +383,6 @@ class FedCluster:
 
     @torch.inference_mode()
     def evaluate_global(self, models, dataloader):
-        """
-        Evaluate all cluster models on global test set.
-        For each sample, get probability distributions from all clusters,
-        then predict the class with highest probability across all clusters.
-        """
         
         for model in models:
             model.eval()
@@ -570,10 +565,12 @@ class FedCluster:
                 self.cluster_fed_avg(local_models, self.models[cl])
                 
                 # Evaluate clients on their test sets if test set exists (independed test set does not exist for femnist)
-                for client in selected_clients:
-                    if client in self.client_loaders_test: 
-                        eval_res = self.evaluate(client, cl, self.models[cl], self.client_loaders_test[client])
-                        result[f'client_{client}'].update(**eval_res)
+                # evaluate each client only once every 5 global itertions
+                if round_num % 5 == 0:
+                    for client in selected_clients:
+                        if client in self.client_loaders_test: 
+                            eval_res = self.evaluate(client, cl, self.models[cl], self.client_loaders_test[client])
+                            result[f'client_{client}'].update(**eval_res)
                 
 
             # for each data sample in the global test set we obtain the highest probable class from each cluster and then pick the highest probable among those and verify it with ground truth
