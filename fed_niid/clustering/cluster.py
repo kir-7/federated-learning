@@ -78,13 +78,33 @@ class FedCluster:
         self.n_clients = config.n_clients
         self.global_rounds = config.global_rounds
         
-        self.train_transform, self.val_transform = self.get_transforms()
-        
+        if config.dataset == 'cifar10':
+            self.train_transform, self.val_transform = self.get_transforms_cifar10()
+        elif config.dataset == "mnist":
+            self.train_transform, self.val_transform = self.get_transforms_mnist()
+
         self.setup_dataset()
         self.assign_clusters_class_distribution()
         self.setup_models()
         
-    def get_transforms(self):
+    
+    def get_transforms_mnist(self):
+        
+        train_transform = transforms.Compose([
+            # transforms.RandomRotation(10), 
+            transforms.ToTensor(),         
+            transforms.Normalize(0.1307, 0.3081) # Normalizes the tensor
+        ])
+        
+        val_transform = transforms.Compose([
+            transforms.ToTensor(),         
+            transforms.Normalize(0.1307, 0.3081) # Normalizes the tensor
+        ])
+
+        return train_transform, val_transform
+
+
+    def get_transforms_cifar10(self):
         
         train_transform = transforms.Compose([
             transforms.ToTensor(),            
@@ -202,10 +222,10 @@ class FedCluster:
         # Make this more flexible for different datasets
         self.all_labels = sorted(range(0, self.config.n_classes))  # TODO: make this dataset-dependent   
 
-        self.client_loaders_train = { i: DataLoader(cp, batch_size=self.config.client_bs, shuffle=True, num_workers=2, pin_memory=True) for i, cp in self.client_partitions_train.items() }
-        self.client_loaders_test = { i: DataLoader(cp, batch_size=self.config.client_bs, shuffle=False, num_workers=2, pin_memory=True)  for i, cp in self.client_partitions_test.items() }
+        self.client_loaders_train = { i: DataLoader(cp, batch_size=self.config.client_bs, shuffle=True) for i, cp in self.client_partitions_train.items() }
+        self.client_loaders_test = { i: DataLoader(cp, batch_size=self.config.client_bs, shuffle=False)  for i, cp in self.client_partitions_test.items() }
         
-        self.global_test_loader = DataLoader(self.global_test_partition, batch_size=self.config.global_bs, num_workers=2, pin_memory=True)
+        self.global_test_loader = DataLoader(self.global_test_partition, batch_size=self.config.global_bs)
     
     def setup_models(self):
         # Create models for each cluster and move to device
@@ -214,7 +234,11 @@ class FedCluster:
         else:
             self.models = [ResnetModel(n_classes=self.config.n_classes).to(self.device) for _ in range(self.config.n_clusters)]        
         self.criterion = nn.CrossEntropyLoss().to(self.device)
-    
+
+    def global_scheduler(self, round_num):
+        # simple: every 2 global rounds multiple the lr by a factor of 0.9  
+        return self.config.client_lr * (0.9**(round_num//2))
+
     def get_distribution_stats(self):
         df = compute_counts(self.partitioner, 'label')
        
@@ -383,87 +407,58 @@ class FedCluster:
 
     @torch.inference_mode()
     def evaluate_global(self, models, dataloader):
-        
         for model in models:
             model.eval()
-        
-        all_predictions = []
-        all_labels = []
-        all_prob_matrices = []
-        all_best_clusters = []
         
         total_samples = 0
         correct_predictions = 0
         
-        # Store per-cluster predictions for analysis
-        cluster_predictions = [[] for _ in range(self.config.n_clusters)]
-        cluster_correct = [0 for _ in range(self.config.n_clusters)]
+        all_best_clusters = []
         
-        for sample in tqdm(dataloader, desc=f"Global Evaluation", leave=False):
+        for sample in tqdm(dataloader, desc="Global Evaluation (Revised)", leave=False):
             images, labels = sample['img'], sample['label']
             images, labels = images.to(self.device), labels.to(self.device)
             batch_size = images.size(0)
             
-            # Shape: [batch_size, n_clusters, n_classes]
-            prob_matrix = torch.zeros(batch_size, self.config.n_clusters, self.config.n_classes, device=self.device)
+            # Store the best prediction and its confidence for each cluster model
+            # Shape: [batch_size, n_clusters]
+            best_preds_per_cluster = torch.zeros(batch_size, self.config.n_clusters, dtype=torch.long, device=self.device)
+            best_probs_per_cluster = torch.zeros(batch_size, self.config.n_clusters, device=self.device)
             
-            # Get predictions from each cluster model
             for i, model in enumerate(models):
                 outputs = model(images)
-                prob_matrix[:, i, :] = F.softmax(outputs, dim=1)
+                probs = F.softmax(outputs, dim=1)
+                # Get the max probability and its corresponding class index for this model
+                max_probs, max_indices = torch.max(probs, dim=1)
+                best_preds_per_cluster[:, i] = max_indices
+                best_probs_per_cluster[:, i] = max_probs
+                
+            # Now, find which cluster was most confident in its best prediction
+            # Shape: [batch_size]
+            winning_cluster_indices = torch.argmax(best_probs_per_cluster, dim=1)
             
-            # Single-step approach: find global maximum across all clusters and classes
-            # Reshape to [batch_size, n_clusters * n_classes] and find global max
-            flattened_probs = prob_matrix.view(batch_size, -1)
-            global_max_indices = torch.argmax(flattened_probs, dim=1)
-            
-            # Extract final predictions and best clusters
-            final_predictions = global_max_indices % self.config.n_classes
-            best_clusters = global_max_indices // self.config.n_classes
+            # Gather the final predictions from the winning clusters
+            # gather() selects values from a tensor based on an index.
+            final_predictions = best_preds_per_cluster.gather(1, winning_cluster_indices.unsqueeze(-1)).squeeze(-1)
             
             # Calculate accuracy
-            correct_mask = (final_predictions == labels)
-            correct_predictions += correct_mask.sum().item()
+            correct_predictions += (final_predictions == labels).sum().item()
             total_samples += batch_size
             
-            # Store results
-            all_predictions.extend(final_predictions.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
-            all_best_clusters.extend(best_clusters.cpu().numpy())
-            all_prob_matrices.append(prob_matrix.cpu().numpy())
-            
-            # Per-cluster analysis (optional)
-            for cluster_idx in range(self.config.n_clusters):
-                cluster_preds = torch.argmax(prob_matrix[:, cluster_idx, :], dim=1)
-                cluster_predictions[cluster_idx].extend(cluster_preds.cpu().numpy())
-                cluster_correct[cluster_idx] += (cluster_preds == labels).sum().item()
-        
-        # Calculate final metrics
-        global_accuracy = correct_predictions / total_samples
-        
-        # Per-cluster accuracies (for analysis)
-        cluster_accuracies = [correct / total_samples for correct in cluster_correct]
-        
-        # Aggregate all probability matrices
-        all_prob_matrices = np.vstack(all_prob_matrices)
-        
-        # Analyze cluster contribution
-        cluster_wins = np.bincount(all_best_clusters, minlength=self.config.n_clusters)
-        cluster_win_rates = cluster_wins / total_samples
-        
-        print(f"Global Test Accuracy: {global_accuracy:.4f}")
-        print(f"Individual Cluster Accuracies: {[f'{acc:.4f}' for acc in cluster_accuracies]}")
-        print(f"Cluster Win Rates: {[f'{rate:.2%}' for rate in cluster_win_rates]}")
-        
-        # Results dictionary
-        results = {
-            'global_accuracy': global_accuracy,
-            'cluster_accuracies': cluster_accuracies,
-            'cluster_win_rates': cluster_win_rates,            
-        }
-        
-        return results
+            all_best_clusters.extend(winning_cluster_indices.cpu().numpy())
 
+        global_accuracy = correct_predictions / total_samples if total_samples > 0 else 0
+        
+        cluster_wins = np.bincount(all_best_clusters, minlength=self.config.n_clusters)
+        cluster_win_rates = cluster_wins / total_samples if total_samples > 0 else np.zeros(self.config.n_clusters)
+        
+        print(f"Global Test Accuracy (Revised): {global_accuracy:.4f}")
+        print(f"Cluster Win Rates: {[f'{rate:.2%}' for rate in cluster_win_rates]}")
+
+        return {
+            'global_accuracy': global_accuracy,
+            'cluster_win_rates': cluster_win_rates.tolist(),
+        }
 
 
     @torch.inference_mode()
@@ -488,9 +483,9 @@ class FedCluster:
         
         return {"val_acc": accuracy, "val_avg_loss": avg_loss}
     
-    def train(self, client, model, dataloader):
+    def train(self, client, model, lr, dataloader):
         model.train()
-        optimizer = torch.optim.Adam(model.parameters(), lr=self.config.client_lr, weight_decay=1e-4)
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=self.config.step_size, gamma=self.config.lr_schd_gamma)
         
         epoch_loss = []
@@ -551,9 +546,11 @@ class FedCluster:
                 
                 # Train selected clients
                 for client in selected_clients:
+                    lr = self.global_scheduler(round_num)
                     local_trained_model, train_res = self.train(
                         client,
                         deepcopy(self.models[cl]), 
+                        lr,
                         self.client_loaders_train[client]
                     )
 
@@ -566,7 +563,7 @@ class FedCluster:
                 
                 # Evaluate clients on their test sets if test set exists (independed test set does not exist for femnist)
                 # evaluate each client only once every 5 global itertions
-                if round_num % 5 == 0:
+                if round_num % 5 == 0 or round_num == self.config.global_rounds-1:
                     for client in selected_clients:
                         if client in self.client_loaders_test: 
                             eval_res = self.evaluate(client, cl, self.models[cl], self.client_loaders_test[client])

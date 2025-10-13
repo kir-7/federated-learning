@@ -49,3 +49,10 @@
 
 * ### Model Convergence based clustering:
     - **Hypothesis:** First need to establish that clients having similar data will converge to spatially similar locations.
+    - **Experimentation:** The plots of convergence of models on MNIST is available at fed_niid/convergence/plots. From the plots it can be very clearly seen that in IID case the models converge towards similar direction and in Non IID case all diverge in difference directions, I don't know the reason this experiment gave expected results but the original one in /extras didn't, a bit skeptical about the correctness of the experiment, but the results are consistant with hypothesis.
+
+    - Previous attempts in model convergence based clustering was based on the loss values, Model state (parameters) etc. clustering based on loss value seem wrong because loss value depends on the data and 2 models having different data might have similar loss values (even though this is works in practice!)
+
+    - The approach of clustering based on model state seems more promissing, this has been done before but one thing to note is that in all previous works the entire model state is used but this might not be feasibile for larger models which have high number of parameters.
+    
+    - Some way of compressing the model state and obtainging a representation vector which can be used for clustering might be better for larger models, and also allows to experiment with different clusters having different model architechtures as well.
