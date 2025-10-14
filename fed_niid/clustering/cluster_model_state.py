@@ -23,6 +23,10 @@ from tqdm.auto import tqdm
 from copy import deepcopy
 from models import MNISTModel, CIFAR10Model, ResnetModel
 
+'''
+This will be used for clustering based on model state, this approach requires to maintain a a client model all the time.  
+'''
+
 @dataclass
 class FedClusterConfig:
     n_clients: int = 10
@@ -48,28 +52,16 @@ class FedClusterConfig:
     torch_seed: int = 42
     np_seed: int = 43
     
-    # K-Means specific parameters
-    kmeans_init: str = 'k-means++'  # initialization method for K-Means
-    kmeans_max_iter: int = 300      # maximum iterations for K-Means
-    kmeans_tol: float = 1e-4        # tolerance for K-Means convergence
-    
-    # DBSCAN clustering parameters
-    dbscan_eps : float = 0.5
-    dbscan_min_samples : int = 3
-
     # Agglomarative clustering parameters
     use_agglomarative : bool = False
     aggl_method : str = 'silhouette'
     aggl_linkage : str = 'ward' 
 
-    # DBSCAN Parameters
-    dbscan_eps : float = 0.5
-    dbscan_min_samples : int = 2
-    use_dbscan : bool = False
+    cluster_every : int  = 3
 
     verbose: bool = True
 
-# TODO: This class needs restructuring, it is growing way too big. 
+
 class FedCluster:
     def __init__(self, config: FedClusterConfig):
         self.config = config
@@ -87,10 +79,12 @@ class FedCluster:
             self.train_transform, self.val_transform = self.get_transforms_mnist()
 
         self.setup_dataset()
-    
-        self.assign_clusters_class_distribution()    
+        
+        # first create models for all clients
         self.setup_models()
-    
+
+        # then assign those models to clusters
+        self.assign_cluster_model_conv()
     
     def get_transforms_mnist(self):
         
@@ -234,140 +228,21 @@ class FedCluster:
     def setup_models(self):
         # Create models for each cluster and move to device
         if self.config.dataset == 'mnist' or self.config.dataset == 'flwrlabs/femnist':
-            self.models = [MNISTModel(n_classes=self.config.n_classes).to(self.device) for _ in range(self.config.n_clusters)]
+            self.models = [MNISTModel(n_classes=self.config.n_classes).to(self.device) for _ in range(self.config.n_clients)]
         else:
-            self.models = [ResnetModel(n_classes=self.config.n_classes).to(self.device) for _ in range(self.config.n_clusters)]        
+            self.models = [ResnetModel(n_classes=self.config.n_classes).to(self.device) for _ in range(self.config.n_clients)]        
         self.criterion = nn.CrossEntropyLoss().to(self.device)
 
     def global_scheduler(self, round_num):
         # simple: every 2 global rounds multiple the lr by a factor of 0.9  
         return self.config.client_lr * (0.9**(round_num//2))
 
-    def get_distribution_stats(self):
-        df = compute_counts(self.partitioner, 'label')
-       
-        dist_stats = []
-        for c in range(self.n_clients):
-            partition_size = len(self.client_partitions_train[c])
-            if partition_size == 0:   
-                client_dist = {label: 0.0 for label in range(df.shape[1])}
-            else:  
-                client_dist = {label: df.iloc[c][label] / partition_size for label in range(df.shape[1])}
-            dist_stats.append(client_dist)
-        
-        return dist_stats
-    
-    def create_feature_matrix(self, distribution_stats):
-        """
-        Create a feature matrix from distribution statistics for K-Means clustering.
-        Each row represents a client, each column represents a class probability.
-        """
-        n_classes = len(self.all_labels)
-        feature_matrix = np.zeros((self.n_clients, n_classes))
-        
-        for i, dist in enumerate(distribution_stats):
-            for j, label in enumerate(self.all_labels):
-                feature_matrix[i, j] = dist.get(label, 0.0)
-        
-        return feature_matrix
-    
-    def create_clusters(self, distribution_stats):
-        """
-        Use K-Means clustering on the class distribution features.
-        """
-        # Create feature matrix where each client is represented by their class distribution
-        feature_matrix = self.create_feature_matrix(distribution_stats)
-        
-        # Apply K-Means clustering
-        kmeans = KMeans(
-            n_clusters=self.config.n_clusters,
-            init=self.config.kmeans_init,
-            max_iter=self.config.kmeans_max_iter,
-            tol=self.config.kmeans_tol,
-            random_state=self.config.np_seed,
-            n_init=10  # number of random initializations
-        )
-        
-        self.labels_ = kmeans.fit_predict(feature_matrix)
-        self.kmeans_model_ = kmeans  # Store the fitted model
-        self.cluster_centers_ = kmeans.cluster_centers_  # Store cluster centers
-        self.inertia_ = kmeans.inertia_  # Store within-cluster sum of squares
-
-        if self.config.verbose:
-            print(f"K-Means inertia (within-cluster sum of squares): {self.inertia_:.4f}")
-            print(f"Cluster centers shape: {self.cluster_centers_.shape}")
-      
-        
-        return self.labels_
-
-    def create_dbscan_clustering(self, distribution_stats):
-        '''
-        Create Clusters using DBSCAN
-        '''
-        
-        feature_matrix = self.create_feature_matrix(distribution_stats)
-
-        dbs = DBSCAN(self.config.dbscan_eps, min_samples=self.config.dbscan_min_samples)
-
-        self.labels_ = dbs.fit_predict(feature_matrix)
-        self.dbs_model = dbs
-
-        count = max(self.labels_)+1
-
-        # all clients classified as noise will be their own clusters
-        for i in range(self.config.n_clients):
-            if self.labels_[i] == -1:
-                self.labels_[i] = count
-                count += 1        
-        
-        self.config.n_clusters = count
-
-        return self.labels_    
-
-    def create_agglomarative_clusters(self, distribution_stats):
+    def create_agglomarative_clusters(self, similarities):
         '''
         Create Clustering using Agglomarative clustering
         '''    
-        feature_matrix = self.create_feature_matrix(distribution_stats)
-        scaler = StandardScaler()
-
-        feature_matrix_scaled = scaler.fit_transform(feature_matrix)
-
-        aggl_clusterer = AutoAgglomerativeClustering(
-            method=self.config.aggl_method,
-            linkage=self.config.aggl_linkage,
-            min_clusters=min(10, self.config.n_clusters),
-            max_clusters = min(10, self.config.n_clients-1)
-        )
         
-        self.labels_ = aggl_clusterer.fit_predict(feature_matrix_scaled)
-        self.aggl_model = aggl_clusterer
-        self.config.n_clusters = max(self.labels_)+1
-        
-        return self.labels_
-
-    @staticmethod
-    def flatten(source):
-        return torch.cat([value.flatten() for value in source.values()])
-
-    def pairwise_similarity(self, vectors):
-        
-        # get angles between all vector pairs
-        norm_vectors = torch.linalg.norm(vectors, dim=1)
-        angles = norm_vectors @ norm_vectors.transpose(0, 1)
-        return angles
-    
-    def assign_cluster_model_conv(self, model_states : list[dict]):
-        '''
-        assign each of n clients to p clusters
-        APPROACH: assign based on the model's state, this will be called every few global rounds to recluster the clients   
-        model states is the list of each client's state dict
-        '''
-
-        similarities = self.pairwise_similarity([model_states])
         distance_matrix = 1 - similarities
-        
-        assert self.config.use_agglomarative == True,  "clustering based on model state should be through Agglomarative clustering only."
 
         scaler = StandardScaler()
 
@@ -384,50 +259,41 @@ class FedCluster:
         self.aggl_model = aggl_clusterer
         self.config.n_clusters = max(self.labels_)+1
 
+        return self.labels_
+
+    @staticmethod
+    def flatten(source : dict):
+        return torch.cat([value.flatten() for value in source.values()])
+
+    def pairwise_similarity(self, vectors):
+        
+        # get angles between all vector pairs
+        norm_vectors = torch.linalg.norm(vectors, dim=1)
+        angles = norm_vectors @ norm_vectors.transpose(0, 1)
+        return angles
+    
+    def assign_cluster_model_conv(self):
+        '''
+        assign each of n clients to p clusters
+        APPROACH: assign based on the model's state, this will be called every few global rounds to recluster the clients   
+        '''
+        
+        model_states = [model.state_dict() for model in self.models]
+
+        flattend_states = [self.flatten(model_state) for model_state in model_states]
+
+        similarities = self.pairwise_similarity(flattend_states)
+                
+        assigned_clusters = self.create_agglomarative_clusters(similarities)
+
         # assign new clusters
         self.clusters = {i: [] for i in range(self.config.n_clusters)}
         for client in range(self.n_clients):
-            self.clusters[self.labels_[client]].append(client)        
+            self.clusters[assigned_clusters[client]].append(client)        
         
         if self.config.verbose:
             print(f"Finished clustering clients.\nCluster Assignment: {self.clusters}")
 
-
-    def assign_clusters_class_distribution(self):  
-        '''
-        assign each of n clients to p clusters
-        APPROACH: assign based on data(class) distributions using K-Means
-        '''
-        
-        distribution_stats = self.get_distribution_stats()
-        if self.config.use_agglomarative:
-            assigned_clusters = self.create_agglomarative_clusters(distribution_stats)
-        elif self.config.use_dbscan:
-                assigned_clusters = self.create_dbscan_clustering(distribution_stats)
-        else:
-            assigned_clusters = self.create_clusters(distribution_stats) 
-
-        self.clusters = {i: [] for i in range(self.config.n_clusters)}
-        
-        for client in range(self.n_clients):
-            self.clusters[assigned_clusters[client]].append(client)
-        
-        if self.config.verbose:
-            print(f"Cluster Assignment: {self.clusters}")
-            
-            # Print cluster statistics
-            for cluster_id in range(self.config.n_clusters):
-                clients_in_cluster = self.clusters[cluster_id]
-                print(f"Cluster {cluster_id}: {len(clients_in_cluster)} clients - {clients_in_cluster}")
-                
-                # Print average class distribution for this cluster
-                if clients_in_cluster:
-                    avg_dist = np.mean([
-                        [distribution_stats[c].get(label, 0.0) for label in self.all_labels] 
-                        for c in clients_in_cluster
-                    ], axis=0)
-                    print(f"  Average class distribution: {avg_dist}")
-    
     @staticmethod
     def cluster_fed_avg(local_models, global_model):
         if not local_models:
@@ -444,14 +310,14 @@ class FedCluster:
                 
         # Average the state_dict
         for key in avg_state_dict:
-            # Note: Tensors like 'num_batches_tracked' in BatchNorm should not be averaged.
+            # NOTE: Tensors like 'num_batches_tracked' in BatchNorm should not be averaged.
             # They are integers. We can just keep the one from the last model.
             # A simple check for floating point type ensures we only average weights, biases, and running stats.
             if avg_state_dict[key].dtype == torch.float32 or avg_state_dict[key].dtype == torch.float64:
                 avg_state_dict[key] = torch.div(avg_state_dict[key], len(local_models))
-
-        # Update the global model with the averaged state_dict
-        global_model.load_state_dict(avg_state_dict)
+        
+        # return th aggregated state dict
+        return avg_state_dict 
 
     @torch.inference_mode()
     def evaluate_global(self, models, dataloader):
@@ -508,7 +374,6 @@ class FedCluster:
             'cluster_win_rates': cluster_win_rates.tolist(),
         }
 
-
     @torch.inference_mode()
     def evaluate(self, client, clus, model, dataloader):
         model.eval()
@@ -559,12 +424,13 @@ class FedCluster:
             avg_loss = sum(batch_loss) / len(batch_loss) if batch_loss else 0
             epoch_loss.append(avg_loss)
         
-        return model, {
+        return {
             'avg_train_loss': sum(epoch_loss) / len(epoch_loss) if epoch_loss else 0,
             "train_loss": epoch_loss[-1] if epoch_loss else 0
         }
     
     def run(self):
+
         '''
         this will follow the structure:
             - for each client: get the latest model assigned to their cluster; train on assigned dataset; use different optimizers; and store the updated weights
@@ -573,7 +439,7 @@ class FedCluster:
             - for each cluster : evaluate the cluster on the specific cluster test dataset and report te accuracy for each cluster    
         '''
 
-        history = []
+        history = []        
 
         for round_num in range(self.config.global_rounds):
             
@@ -581,47 +447,59 @@ class FedCluster:
                 print(f"\n=== Global Round {round_num + 1}/{self.config.global_rounds} ===")
             
             result = {}
-            
+            cluster_evals = []
+
             for cl in range(self.config.n_clusters):
                 if not self.clusters[cl]:  # Skip empty clusters
                     continue
-                
+            
+                client_evals = []  
+
                 # Select clients for this round
                 m = max(int(self.config.m * len(self.clusters[cl])), 1)
                 selected_clients = np.random.choice(self.clusters[cl], m, replace=False).tolist()
-                
-                local_models = []
-                
+                                
                 # Train selected clients
                 for client in selected_clients:
                     lr = self.global_scheduler(round_num)
-                    local_trained_model, train_res = self.train(
+                    train_res = self.train(
                         client,
-                        deepcopy(self.models[cl]), 
+                        self.models[client], 
                         lr,
                         self.client_loaders_train[client]
                     )
-
-                    local_models.append(local_trained_model)
                     
                     result[f'client_{client}'] = train_res
                 
-                # Aggregate models
-                self.cluster_fed_avg(local_models, self.models[cl])
-                
-                # Evaluate clients on their test sets if test set exists (independed test set does not exist for femnist)
-                # evaluate each client only once every 5 global itertions
-                if round_num % 5 == 0 or round_num == self.config.global_rounds-1:
-                    for client in selected_clients:
-                        if client in self.client_loaders_test: 
-                            eval_res = self.evaluate(client, cl, self.models[cl], self.client_loaders_test[client])
-                            result[f'client_{client}'].update(**eval_res)
-                
+                # aggregate
+                if round_num % self.config.cluster_every != 0:
+                    aggregated_model_state = self.cluster_fed_avg([self.models[client] for client in selected_clients])
+                    for client in selected_clients: self.models[client].load_state_dict(aggregated_model_state)
+                    
+                    # Evaluate clients on their test sets if test set exists (independed test set does not exist for femnist)
+                    # evaluate each client only once every 5 global itertions
+                    if round_num % 5 == 0 or round_num == self.config.global_rounds-1:
+                        for client in selected_clients:
+                            if client in self.client_loaders_test: 
+                                eval_res = self.evaluate(client, cl, self.models[client], self.client_loaders_test[client])
+                                result[f'client_{client}'].update(**eval_res)
+                                client_evals.append(eval_res['val_acc'])
 
-            # for each data sample in the global test set we obtain the highest probable class from each cluster and then pick the highest probable among those and verify it with ground truth
-            eval_global_res = self.evaluate_global([self.models[i] for i in range(self.config.n_clusters)], self.global_test_loader)
-            
-            result.update(**eval_global_res)
+                        cluster_evals.append(sum(client_evals)/len(client_evals))            
+                                
+            # after all clusters are trained then re cluster this round if allowed            
+            if round_num % self.config.cluster_every == 0:
+                print(f"Round: {round_num} --- Reclustering")
+                self.assign_cluster_model_conv()
+            else:
+                # report the average client performance across all clusters this might be more important than global test loader performance
+                print(f"Average all clients performance: {sum(cluster_evals)/len(cluster_evals)}")            
+                result.update({"average_acc":sum(cluster_evals)/len(cluster_evals)})
+                
+                # for each data sample in the global test set we obtain the highest probable class from each cluster and then pick the highest probable among those and verify it with ground truth
+                # This global evaluation is not really that important in Model state based clusteirng
+                eval_global_res = self.evaluate_global([self.models[self.clusters[i][0]] for i in range(self.config.n_clusters)], self.global_test_loader)
+                result.update(**eval_global_res)
 
             if self.config.verbose:
                 print(result)
@@ -629,8 +507,3 @@ class FedCluster:
             history.append(result)
         
         return history, self.clusters
-
-if __name__ == '__main__':
-    config = FedClusterConfig()
-    component = FedCluster(config)
-    results, clusters = component.run()
