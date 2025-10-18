@@ -24,11 +24,11 @@ from copy import deepcopy
 from models import MNISTModel, CIFAR10Model, ResnetModel
 
 '''
-This will be used for clustering based on model state, this approach requires to maintain a a client model all the time.  
+This will be used for clustering based on model state, this approach requires to maintain a seperate client model all the time.  
 '''
 
 @dataclass
-class FedClusterConfig:
+class FedStateClusterConfig:
     n_clients: int = 10
     n_clusters: int = 2
     m: float = 1.0    # fraction of clients of each cluster that needs to be involved in training
@@ -53,17 +53,18 @@ class FedClusterConfig:
     np_seed: int = 43
     
     # Agglomarative clustering parameters
-    use_agglomarative : bool = False
     aggl_method : str = 'silhouette'
     aggl_linkage : str = 'ward' 
 
     cluster_every : int  = 3
+    start_recluster : int = 20
+    local_eval_every : int  = 3
 
     verbose: bool = True
 
 
-class FedCluster:
-    def __init__(self, config: FedClusterConfig):
+class FedStateCluster:
+    def __init__(self, config: FedStateClusterConfig):
         self.config = config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
@@ -77,14 +78,39 @@ class FedCluster:
             self.train_transform, self.val_transform = self.get_transforms_cifar10()
         elif config.dataset == "mnist":
             self.train_transform, self.val_transform = self.get_transforms_mnist()
-
+        elif config.dataset == 'rotmnist':
+            self.train_transform, self.simple_train_transform, self.val_transform = self.get_transforms_rotmnist()
+        else:
+            raise ValueError(f"dataset: {config.dataset} not allowed")
+        
         self.setup_dataset()
         
         # first create models for all clients
         self.setup_models()
 
         # then assign those models to clusters
-        self.assign_cluster_model_conv()
+        self.initialize_clusters()
+
+    def get_transforms_rotmnist(self):
+
+        simple_train_transform = transforms.Compose([
+            transforms.ToTensor(),         
+            transforms.Normalize(0.1307, 0.3081) # Normalizes the tensor
+        ])
+
+        train_transform = transforms.Compose([
+            transforms.RandomRotation((180, 180)), 
+            transforms.ToTensor(),         
+            transforms.Normalize(0.1307, 0.3081) # Normalizes the tensor
+        ])
+        
+        val_transform = transforms.Compose([
+            transforms.ToTensor(),         
+            transforms.Normalize(0.1307, 0.3081) # Normalizes the tensor
+        ])
+
+        return train_transform, simple_train_transform, val_transform
+
     
     def get_transforms_mnist(self):
         
@@ -104,6 +130,7 @@ class FedCluster:
 
     def get_transforms_cifar10(self):
         
+        # testing out Rotated MNist performance
         train_transform = transforms.Compose([
             transforms.ToTensor(),            
             transforms.RandomCrop(32, padding=4),
@@ -118,6 +145,18 @@ class FedCluster:
 
         return train_transform, val_transform
 
+    def apply_transforms_simple_train(self, batch):
+        if self.config.dataset == 'flwrlabs/femnist':
+            batch['img'] = [self.simple_train_transform(img.convert("L")) for img in batch['image']] # Convert to grayscale
+            batch['label'] = batch['character']
+            del batch['image']
+            del batch['character']
+        if self.config.dataset == 'mnist' or self.config.dataset == 'rotmnist':
+            batch['img'] = [self.simple_train_transform(img) for img in batch['image']]
+            del batch['image']
+        else:
+            batch['img'] = [self.simple_train_transform(img) for img in batch['img']]
+        return batch
     
     def apply_transforms_train(self, batch):
         if self.config.dataset == 'flwrlabs/femnist':
@@ -125,7 +164,7 @@ class FedCluster:
             batch['label'] = batch['character']
             del batch['image']
             del batch['character']
-        if self.config.dataset == 'mnist':
+        if self.config.dataset == 'mnist' or self.config.dataset == 'rotmnist':
             batch['img'] = [self.train_transform(img) for img in batch['image']]
             del batch['image']
         else:
@@ -138,7 +177,7 @@ class FedCluster:
             batch['label'] = batch['character']
             del batch['image']
             del batch['character']
-        if self.config.dataset == 'mnist':
+        if self.config.dataset == 'mnist' or self.config.dataset == 'rotmnist':
             batch['img'] = [self.val_transform(img) for img in batch['image']]
             del batch['image']
         else:
@@ -197,23 +236,27 @@ class FedCluster:
             
         else:
             fds = FederatedDataset(
-                dataset=self.config.dataset,
+                dataset='mnist' if self.config.dataset == 'rotmnist' else self.config.dataset,
                 partitioners={
                     "train": self.partitioner,
                     'test': deepcopy(self.partitioner)
                 },
                 trust_remote_code=True
             )
-        
-            self.client_partitions_train = {
-                i: fds.load_partition(i, "train").with_transform(self.apply_transforms_train) 
-                for i in range(self.n_clients)
-            }
-            self.client_partitions_test = {
-                i: fds.load_partition(i, 'test').with_transform(self.apply_transforms_test)
-                for i in range(self.n_clients)
-            }
-       
+            
+            self.client_partitions_test = {}
+            self.client_partitions_train = {}
+
+            for i in range(self.n_clients):
+            
+                if i < int(0.5 * self.n_clients):
+                    self.client_partitions_train[i] =  fds.load_partition(i, "train").with_transform(self.apply_transforms_simple_train)                    
+                    self.client_partitions_test[i] =  fds.load_partition(i, "test").with_transform(self.apply_transforms_test)  # dont apply rotation to test set                
+                else:
+                    self.client_partitions_train[i] =  fds.load_partition(i, "train").with_transform(self.apply_transforms_train)
+                    self.client_partitions_test[i] =  fds.load_partition(i, "test").with_transform(self.apply_transforms_train)  # apply rotation to test st as well
+                
+                   
             # Load the global test partition for other datasets
             self.global_test_partition = fds.load_split('test').with_transform(self.apply_transforms_test)
         
@@ -227,7 +270,7 @@ class FedCluster:
     
     def setup_models(self):
         # Create models for each cluster and move to device
-        if self.config.dataset == 'mnist' or self.config.dataset == 'flwrlabs/femnist':
+        if self.config.dataset == 'mnist' or self.config.dataset == 'rotmnist' or self.config.dataset == 'flwrlabs/femnist':
             self.models = [MNISTModel(n_classes=self.config.n_classes).to(self.device) for _ in range(self.config.n_clients)]
         else:
             self.models = [ResnetModel(n_classes=self.config.n_classes).to(self.device) for _ in range(self.config.n_clients)]        
@@ -243,19 +286,16 @@ class FedCluster:
         '''    
         
         distance_matrix = 1 - similarities
-
-        scaler = StandardScaler()
-
-        feature_matrix_scaled = scaler.fit_transform(distance_matrix)
-
+        
         aggl_clusterer = AutoAgglomerativeClustering(
-            method='precomputed',
+            method='silhouette',
+            metric='precomputed',
             linkage='complete', # mostly will be `complete`
-            min_clusters=1,  # if clustering based on model state then before starting mostly all models should be in same cluster, then they should start to diverge  
+            min_clusters=2,  # if clustering based on model state then before starting mostly all models should be in same cluster, then they should start to diverge  
             max_clusters = min(10, self.config.n_clients-1)
         )
         
-        self.labels_ = aggl_clusterer.fit_predict(feature_matrix_scaled)
+        self.labels_ = aggl_clusterer.fit_predict(distance_matrix)
         self.aggl_model = aggl_clusterer
         self.config.n_clusters = max(self.labels_)+1
 
@@ -265,13 +305,18 @@ class FedCluster:
     def flatten(source : dict):
         return torch.cat([value.flatten() for value in source.values()])
 
-    def pairwise_similarity(self, vectors):
-        
+    @staticmethod
+    def pairwise_similarity(vectors):        
         # get angles between all vector pairs
-        norm_vectors = torch.linalg.norm(vectors, dim=1)
-        angles = norm_vectors @ norm_vectors.transpose(0, 1)
-        return angles
+        norm_vectors = F.normalize(torch.stack(vectors), p=2, dim=1)
+        angles = norm_vectors @ norm_vectors.T
+        return angles.cpu().numpy()
     
+    def initialize_clusters(self):        
+        print("Initializing with a single cluster for all clients.")
+        self.config.n_clusters = 1
+        self.clusters = {0:list(range(self.config.n_clients))}
+
     def assign_cluster_model_conv(self):
         '''
         assign each of n clients to p clusters
@@ -295,7 +340,7 @@ class FedCluster:
             print(f"Finished clustering clients.\nCluster Assignment: {self.clusters}")
 
     @staticmethod
-    def cluster_fed_avg(local_models, global_model):
+    def cluster_fed_avg(local_models):
         if not local_models:
             return
             
@@ -320,54 +365,55 @@ class FedCluster:
         return avg_state_dict 
 
     @torch.inference_mode()
-    def evaluate_global(self, models, dataloader):
-        for model in models:
+    def evaluate_global(self, dataloader):
+        # Get one representative model from each cluster (they are identical post-aggregation)
+        cluster_models = []
+
+        for cl in range(self.config.n_clusters):
+            if self.clusters[cl]: # Ensure cluster is not empty
+                rep_client_id = self.clusters[cl][0]
+                cluster_models.append(self.models[rep_client_id])
+        
+        if not cluster_models:
+             print("No models to evaluate.")
+             return {'global_accuracy': 0, 'cluster_win_rates': []}
+        
+        for model in cluster_models:
             model.eval()
         
         total_samples = 0
         correct_predictions = 0
-        
         all_best_clusters = []
         
-        for sample in tqdm(dataloader, desc="Global Evaluation (Revised)", leave=False):
+        for sample in tqdm(dataloader, desc="Global Evaluation", leave=False):
             images, labels = sample['img'], sample['label']
             images, labels = images.to(self.device), labels.to(self.device)
             batch_size = images.size(0)
             
-            # Store the best prediction and its confidence for each cluster model
-            # Shape: [batch_size, n_clusters]
-            best_preds_per_cluster = torch.zeros(batch_size, self.config.n_clusters, dtype=torch.long, device=self.device)
-            best_probs_per_cluster = torch.zeros(batch_size, self.config.n_clusters, device=self.device)
+            best_preds_per_cluster = torch.zeros(batch_size, len(cluster_models), dtype=torch.long, device=self.device)
+            best_probs_per_cluster = torch.zeros(batch_size, len(cluster_models), device=self.device)
             
-            for i, model in enumerate(models):
+            for i, model in enumerate(cluster_models):
                 outputs = model(images)
                 probs = F.softmax(outputs, dim=1)
-                # Get the max probability and its corresponding class index for this model
                 max_probs, max_indices = torch.max(probs, dim=1)
                 best_preds_per_cluster[:, i] = max_indices
                 best_probs_per_cluster[:, i] = max_probs
                 
-            # Now, find which cluster was most confident in its best prediction
-            # Shape: [batch_size]
             winning_cluster_indices = torch.argmax(best_probs_per_cluster, dim=1)
-            
-            # Gather the final predictions from the winning clusters
-            # gather() selects values from a tensor based on an index.
             final_predictions = best_preds_per_cluster.gather(1, winning_cluster_indices.unsqueeze(-1)).squeeze(-1)
             
-            # Calculate accuracy
             correct_predictions += (final_predictions == labels).sum().item()
             total_samples += batch_size
-            
             all_best_clusters.extend(winning_cluster_indices.cpu().numpy())
 
         global_accuracy = correct_predictions / total_samples if total_samples > 0 else 0
+        cluster_wins = np.bincount(all_best_clusters, minlength=len(cluster_models))
+        cluster_win_rates = cluster_wins / total_samples if total_samples > 0 else np.zeros(len(cluster_models))
         
-        cluster_wins = np.bincount(all_best_clusters, minlength=self.config.n_clusters)
-        cluster_win_rates = cluster_wins / total_samples if total_samples > 0 else np.zeros(self.config.n_clusters)
-        
-        print(f"Global Test Accuracy (Revised): {global_accuracy:.4f}")
-        print(f"Cluster Win Rates: {[f'{rate:.2%}' for rate in cluster_win_rates]}")
+        if self.config.verbose:
+            print(f"Global Test Accuracy: {global_accuracy:.4f}")
+            print(f"Cluster Win Rates: {[f'{rate:.2%}' for rate in cluster_win_rates]}")
 
         return {
             'global_accuracy': global_accuracy,
@@ -431,14 +477,6 @@ class FedCluster:
     
     def run(self):
 
-        '''
-        this will follow the structure:
-            - for each client: get the latest model assigned to their cluster; train on assigned dataset; use different optimizers; and store the updated weights
-            - for each cluster : aggregated the cluster's local models and apply FedAVG on that. 
-            - for each cluster : evaluate the cluster model on test dataset and take the least loss and get corresponding accuracy
-            - for each cluster : evaluate the cluster on the specific cluster test dataset and report te accuracy for each cluster    
-        '''
-
         history = []        
 
         for round_num in range(self.config.global_rounds):
@@ -447,13 +485,10 @@ class FedCluster:
                 print(f"\n=== Global Round {round_num + 1}/{self.config.global_rounds} ===")
             
             result = {}
-            cluster_evals = []
 
             for cl in range(self.config.n_clusters):
                 if not self.clusters[cl]:  # Skip empty clusters
-                    continue
-            
-                client_evals = []  
+                    continue            
 
                 # Select clients for this round
                 m = max(int(self.config.m * len(self.clusters[cl])), 1)
@@ -463,43 +498,49 @@ class FedCluster:
                 for client in selected_clients:
                     lr = self.global_scheduler(round_num)
                     train_res = self.train(
-                        client,
-                        self.models[client], 
-                        lr,
-                        self.client_loaders_train[client]
+                        client, self.models[client], lr, self.client_loaders_train[client]
                     )
                     
                     result[f'client_{client}'] = train_res
                 
                 # aggregate
-                if round_num % self.config.cluster_every != 0:
+                if round_num % self.config.cluster_every != 0 or round_num < self.config.start_recluster:
                     aggregated_model_state = self.cluster_fed_avg([self.models[client] for client in selected_clients])
-                    for client in selected_clients: self.models[client].load_state_dict(aggregated_model_state)
-                    
-                    # Evaluate clients on their test sets if test set exists (independed test set does not exist for femnist)
-                    # evaluate each client only once every 5 global itertions
-                    if round_num % 5 == 0 or round_num == self.config.global_rounds-1:
-                        for client in selected_clients:
-                            if client in self.client_loaders_test: 
-                                eval_res = self.evaluate(client, cl, self.models[client], self.client_loaders_test[client])
-                                result[f'client_{client}'].update(**eval_res)
-                                client_evals.append(eval_res['val_acc'])
-
-                        cluster_evals.append(sum(client_evals)/len(client_evals))            
+                    for client in self.clusters[cl]: self.models[client].load_state_dict(aggregated_model_state)
+                                                    
                                 
             # after all clusters are trained then re cluster this round if allowed            
-            if round_num % self.config.cluster_every == 0:
+            if round_num % self.config.cluster_every == 0 and round_num >= self.config.start_recluster:
                 print(f"Round: {round_num} --- Reclustering")
                 self.assign_cluster_model_conv()
-            else:
+    
+                for cl in range(self.config.n_clusters):
+                    aggregated_model_state = self.cluster_fed_avg([self.models[client] for client in self.clusters[cl]])    
+                    for client in self.clusters[cl]: self.models[client].load_state_dict(aggregated_model_state)
+                    
+            # Evaluate clients on their test sets if test set exists (independed test set does not exist for femnist)
+            # evaluate each client only once every 3 global itertions
+            if round_num % self.config.local_eval_every == 0 or round_num == self.config.global_rounds-1:
+                cluster_evals = []
+    
+                for cl in range(self.config.n_clusters):
+                    client_evals = []
+                    for client in self.clusters[cl]:
+                        if client in self.client_loaders_test: 
+                            eval_res = self.evaluate(client, cl, self.models[client], self.client_loaders_test[client])
+                            result[f'client_{client}'].update(**eval_res)
+                            client_evals.append(eval_res['val_acc'])
+
+                    cluster_evals.append(sum(client_evals)/len(client_evals))
+                
                 # report the average client performance across all clusters this might be more important than global test loader performance
                 print(f"Average all clients performance: {sum(cluster_evals)/len(cluster_evals)}")            
                 result.update({"average_acc":sum(cluster_evals)/len(cluster_evals)})
-                
-                # for each data sample in the global test set we obtain the highest probable class from each cluster and then pick the highest probable among those and verify it with ground truth
-                # This global evaluation is not really that important in Model state based clusteirng
-                eval_global_res = self.evaluate_global([self.models[self.clusters[i][0]] for i in range(self.config.n_clusters)], self.global_test_loader)
-                result.update(**eval_global_res)
+            
+            # for each data sample in the global test set we obtain the highest probable class from each cluster and then pick the highest probable among those and verify it with ground truth
+            # This global evaluation is not really that important in Model state based clusteirng
+            eval_global_res = self.evaluate_global(self.global_test_loader)
+            result.update(**eval_global_res)
 
             if self.config.verbose:
                 print(result)
