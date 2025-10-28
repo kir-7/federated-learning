@@ -56,3 +56,7 @@
     - The approach of clustering based on model state seems more promissing, this has been done before but one thing to note is that in all previous works the entire model state is used but this might not be feasibile for larger models which have high number of parameters.
     
     - Some way of compressing the model state and obtainging a representation vector which can be used for clustering might be better for larger models, and also allows to experiment with different clusters having different model architechtures as well.
+
+    - Experimentation to check performance when clustering based on model state by taking pairwise similarity(cosine) between the each client. the results are there in **fed_niid/clustering/convergence/state_clust_results**, the results are promising, but need to test on diverse datasets, and benchmark performance on femnist
+    
+    - Noticed that current implementation of all appraches are very monolithic and this is not good for experimentation so, need to refactor the code to be more easy to extend to different datasets.

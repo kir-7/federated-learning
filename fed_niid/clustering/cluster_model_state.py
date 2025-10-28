@@ -82,6 +82,8 @@ class FedStateCluster:
             self.train_transform, self.simple_train_transform, self.val_transform = self.get_transforms_rotmnist()
         else:
             raise ValueError(f"dataset: {config.dataset} not allowed")
+    
+        self.logger = {} 
         
         self.setup_dataset()
         
@@ -337,7 +339,7 @@ class FedStateCluster:
             self.clusters[assigned_clusters[client]].append(client)        
         
         if self.config.verbose:
-            print(f"Finished clustering clients.\nCluster Assignment: {self.clusters}")
+            print(f"Finished clustering clients.\nCluster Assignment: {self.clusters}")            
 
     @staticmethod
     def cluster_fed_avg(local_models):
@@ -506,8 +508,7 @@ class FedStateCluster:
                 # aggregate
                 if round_num % self.config.cluster_every != 0 or round_num < self.config.start_recluster:
                     aggregated_model_state = self.cluster_fed_avg([self.models[client] for client in selected_clients])
-                    for client in self.clusters[cl]: self.models[client].load_state_dict(aggregated_model_state)
-                                                    
+                    for client in self.clusters[cl]: self.models[client].load_state_dict(aggregated_model_state)                                                    
                                 
             # after all clusters are trained then re cluster this round if allowed            
             if round_num % self.config.cluster_every == 0 and round_num >= self.config.start_recluster:
@@ -517,7 +518,7 @@ class FedStateCluster:
                 for cl in range(self.config.n_clusters):
                     aggregated_model_state = self.cluster_fed_avg([self.models[client] for client in self.clusters[cl]])    
                     for client in self.clusters[cl]: self.models[client].load_state_dict(aggregated_model_state)
-                    
+                                                    
             # Evaluate clients on their test sets if test set exists (independed test set does not exist for femnist)
             # evaluate each client only once every 3 global itertions
             if round_num % self.config.local_eval_every == 0 or round_num == self.config.global_rounds-1:
@@ -547,4 +548,6 @@ class FedStateCluster:
             
             history.append(result)
         
+            self.logger[round_num] = {"cluster":self.clusters, **result}            
+
         return history, self.clusters
