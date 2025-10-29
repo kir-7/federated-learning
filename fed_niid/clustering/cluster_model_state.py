@@ -6,10 +6,6 @@ from torch.utils.data import DataLoader, Subset
 from torchvision import transforms
 from datasets import load_dataset
 
-from flwr_datasets import FederatedDataset
-from flwr_datasets.partitioner import IidPartitioner, DirichletPartitioner
-from flwr_datasets.metrics.utils import compute_counts
-from flwr_datasets.visualization import plot_label_distributions
 
 import numpy as np
 from scipy.stats import wasserstein_distance
@@ -47,7 +43,10 @@ class FedStateClusterConfig:
     client_lr: float = 1e-4
     step_size : int = 2
     lr_schd_gamma = 0.5
-    
+
+    train_test_split : float = 0.8
+    total_train_samples : int = 100000
+    total_test_samples : int = 20000    
     # seed
     torch_seed: int = 42
     np_seed: int = 43
@@ -62,9 +61,8 @@ class FedStateClusterConfig:
 
     verbose: bool = True
 
-
 class FedStateCluster:
-    def __init__(self, config: FedStateClusterConfig):
+    def __init__(self, config: FedStateClusterConfig, global_test_partition:dict[str, torch.utils.data.Dataset], client_parition_train:dict[str, torch.utils.data.Dataset], client_partitions_test:dict[str, torch.utils.data.Dataset]):
         self.config = config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
@@ -73,19 +71,15 @@ class FedStateCluster:
         
         self.n_clients = config.n_clients
         self.global_rounds = config.global_rounds
-        
-        if config.dataset == 'cifar10':
-            self.train_transform, self.val_transform = self.get_transforms_cifar10()
-        elif config.dataset == "mnist":
-            self.train_transform, self.val_transform = self.get_transforms_mnist()
-        elif config.dataset == 'rotmnist':
-            self.train_transform, self.simple_train_transform, self.val_transform = self.get_transforms_rotmnist()
-        else:
-            raise ValueError(f"dataset: {config.dataset} not allowed")
-    
+                
         self.logger = {} 
         
+        self.client_partitions_test = client_partitions_test
+        self.client_partitions_train = client_parition_train
+        self.global_test_partition = global_test_partition
+
         self.setup_dataset()
+
         
         # first create models for all clients
         self.setup_models()
@@ -93,174 +87,8 @@ class FedStateCluster:
         # then assign those models to clusters
         self.initialize_clusters()
 
-    def get_transforms_rotmnist(self):
 
-        simple_train_transform = transforms.Compose([
-            transforms.ToTensor(),         
-            transforms.Normalize(0.1307, 0.3081) # Normalizes the tensor
-        ])
-
-        train_transform = transforms.Compose([
-            transforms.RandomRotation((180, 180)), 
-            transforms.ToTensor(),         
-            transforms.Normalize(0.1307, 0.3081) # Normalizes the tensor
-        ])
-        
-        val_transform = transforms.Compose([
-            transforms.ToTensor(),         
-            transforms.Normalize(0.1307, 0.3081) # Normalizes the tensor
-        ])
-
-        return train_transform, simple_train_transform, val_transform
-
-    
-    def get_transforms_mnist(self):
-        
-        train_transform = transforms.Compose([
-            # transforms.RandomRotation(10), 
-            transforms.ToTensor(),         
-            transforms.Normalize(0.1307, 0.3081) # Normalizes the tensor
-        ])
-        
-        val_transform = transforms.Compose([
-            transforms.ToTensor(),         
-            transforms.Normalize(0.1307, 0.3081) # Normalizes the tensor
-        ])
-
-        return train_transform, val_transform
-
-
-    def get_transforms_cifar10(self):
-        
-        # testing out Rotated MNist performance
-        train_transform = transforms.Compose([
-            transforms.ToTensor(),            
-            transforms.RandomCrop(32, padding=4),
-            transforms.RandomHorizontalFlip(),
-            transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616]) if self.config.dataset == 'cifar10' else transforms.Normalize((0.1307,), (0.3081,))
-        ])
-        
-        val_transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616])  if self.config.dataset == 'cifar10' else transforms.Normalize((0.1307,), (0.3081,))
-        ])
-
-        return train_transform, val_transform
-
-    def apply_transforms_simple_train(self, batch):
-        if self.config.dataset == 'flwrlabs/femnist':
-            batch['img'] = [self.simple_train_transform(img.convert("L")) for img in batch['image']] # Convert to grayscale
-            batch['label'] = batch['character']
-            del batch['image']
-            del batch['character']
-        if self.config.dataset == 'mnist' or self.config.dataset == 'rotmnist':
-            batch['img'] = [self.simple_train_transform(img) for img in batch['image']]
-            del batch['image']
-        else:
-            batch['img'] = [self.simple_train_transform(img) for img in batch['img']]
-        return batch
-    
-    def apply_transforms_train(self, batch):
-        if self.config.dataset == 'flwrlabs/femnist':
-            batch['img'] = [self.train_transform(img.convert("L")) for img in batch['image']] # Convert to grayscale
-            batch['label'] = batch['character']
-            del batch['image']
-            del batch['character']
-        if self.config.dataset == 'mnist' or self.config.dataset == 'rotmnist':
-            batch['img'] = [self.train_transform(img) for img in batch['image']]
-            del batch['image']
-        else:
-            batch['img'] = [self.train_transform(img) for img in batch['img']]
-        return batch
-    
-    def apply_transforms_test(self, batch):
-        if self.config.dataset == 'flwrlabs/femnist':
-            batch['img'] = [self.val_transform(img.convert("L")) for img in batch['image']] # Convert to grayscale
-            batch['label'] = batch['character']
-            del batch['image']
-            del batch['character']
-        if self.config.dataset == 'mnist' or self.config.dataset == 'rotmnist':
-            batch['img'] = [self.val_transform(img) for img in batch['image']]
-            del batch['image']
-        else:
-            batch['img'] = [self.val_transform(img) for img in batch['img']]
-        return batch
-
-    def setup_dataset(self):
-        if self.config.method == 'dirichlet':
-            self.partitioner = DirichletPartitioner(
-                num_partitions=self.config.n_clients,
-                partition_by=self.config.partition_column,
-                alpha=self.config.dirichlet_alpha,
-                min_partition_size=10
-            )
-        elif self.config.method == 'iid':
-            self.partitioner = IidPartitioner(num_partitions=self.config.n_clients)
-        else:
-            raise ValueError(f"Unknown partitioning method: {self.config.method}")
-
-        if self.config.dataset == 'flwrlabs/femnist':
-
-            fds = FederatedDataset(
-                dataset=self.config.dataset,
-                partitioners={"train": self.partitioner},
-                trust_remote_code=True
-            )
-            
-            # for femnist create train/test split from the train data for each client
-            self.client_partitions_train = {}
-            self.client_partitions_test = {}
-            
-            for i in range(self.config.n_clients):
-                full_partition = fds.load_partition(i, "train")
-                
-                # Split each client's data into train/test (80/20)
-                total_size = len(full_partition)
-                train_size = int(0.8 * total_size)
-                
-                train_indices = list(range(train_size))
-                test_indices = list(range(train_size, total_size))
-                
-                self.client_partitions_train[i] = full_partition.select(train_indices).with_transform(self.apply_transforms_train)
-                self.client_partitions_test[i] = full_partition.select(test_indices).with_transform(self.apply_transforms_test)
-
-            all_test_data = []
-            for i in range(self.config.n_clients):
-                client_test = fds.load_partition(i, "train")
-                total_size = len(client_test)
-                train_size = int(0.8 * total_size)
-                test_indices = list(range(train_size, total_size))
-                all_test_data.extend([client_test[idx] for idx in test_indices])
-            
-            # Convert to dataset format for global test
-            from datasets import Dataset
-            self.global_test_partition = Dataset.from_list(all_test_data).with_transform(self.apply_transforms_test)
-            
-        else:
-            fds = FederatedDataset(
-                dataset='mnist' if self.config.dataset == 'rotmnist' else self.config.dataset,
-                partitioners={
-                    "train": self.partitioner,
-                    'test': deepcopy(self.partitioner)
-                },
-                trust_remote_code=True
-            )
-            
-            self.client_partitions_test = {}
-            self.client_partitions_train = {}
-
-            for i in range(self.n_clients):
-            
-                if i < int(0.5 * self.n_clients):
-                    self.client_partitions_train[i] =  fds.load_partition(i, "train").with_transform(self.apply_transforms_simple_train)                    
-                    self.client_partitions_test[i] =  fds.load_partition(i, "test").with_transform(self.apply_transforms_test)  # dont apply rotation to test set                
-                else:
-                    self.client_partitions_train[i] =  fds.load_partition(i, "train").with_transform(self.apply_transforms_train)
-                    self.client_partitions_test[i] =  fds.load_partition(i, "test").with_transform(self.apply_transforms_train)  # apply rotation to test st as well
-                
-                   
-            # Load the global test partition for other datasets
-            self.global_test_partition = fds.load_split('test').with_transform(self.apply_transforms_test)
+    def setup_dataset(self):        
         
         # Make this more flexible for different datasets
         self.all_labels = sorted(range(0, self.config.n_classes))  # TODO: make this dataset-dependent   
