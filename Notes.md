@@ -60,3 +60,11 @@
     - Experimentation to check performance when clustering based on model state by taking pairwise similarity(cosine) between the each client. the results are there in **fed_niid/clustering/convergence/state_clust_results**, the results are promising, but need to test on diverse datasets, and benchmark performance on femnist
     
     - Noticed that current implementation of all appraches are very monolithic and this is not good for experimentation so, need to refactor the code to be more easy to extend to different datasets.
+
+    ### Approaches:
+
+    - during the training part, after each round there would be some clients that would be unstable, they would change their cluster regularly, these clients are unreliable and they should not be used for Fedavg with in the cluster, so assigning a reliability score to each client and based on these reliabilty score we will aggregate
+
+    - In Non IID cases there are chances that client often times have charecteristics more than one cluster that is when they are the edge joining 2 clusters, for these clients we can use them for both the clusters, for this we can use clustering like fuzzy kmeans for creating overlapping clusters.
+
+    - I see that in some papers they represent clients as a graph structure where once we get the distance between clients they use a threshold to check and place an edge between those clients, and then perform clustering on this graph, so am thinking we use the temporal graph clustering algorithms where the structure of the grph changes over time based on distance/similarity scores.

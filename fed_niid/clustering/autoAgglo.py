@@ -6,6 +6,10 @@ from scipy.cluster.hierarchy import dendrogram, linkage, fcluster
 from scipy.spatial.distance import pdist, squareform
 from sklearn.preprocessing import StandardScaler
 from sklearn.datasets import make_blobs
+from sklearn.manifold import MDS
+
+import skfuzzy as fuzz
+
 
 class AutoAgglomerativeClustering:
     """
@@ -13,7 +17,7 @@ class AutoAgglomerativeClustering:
     """
     
     def __init__(self, method='silhouette', linkage='ward', 
-                 min_clusters=2, max_clusters=10, metric='euclidean'):
+                 min_clusters=2, max_clusters=10, metric='euclidean', fuzzy_clusters=3, fuzzy_thr=0.8):
         """
         Parameters:
         -----------
@@ -40,6 +44,9 @@ class AutoAgglomerativeClustering:
         self.optimal_clusters_ = None
         self.labels_ = None
         self.linkage_matrix_ = None
+        self.fuzzy_clusters = fuzzy_clusters
+        self.fuzzy_thr = fuzzy_thr
+        self.MDS_DIM = 20
         self.scores_ = {}
         
     def fit(self, X):
@@ -53,11 +60,48 @@ class AutoAgglomerativeClustering:
             self._fit_gap_statistic(X)
         elif self.method == 'dendrogram':
             self._fit_dendrogram(X)
+        elif self.methid == 'fuzzy_cmeans':
+            self._fuzzy_Cmeans(X)
         else:
             raise ValueError(f"Unknown method: {self.method}")
             
         return self
-    
+
+    def _fuzzy_Cmeans(self, dist_matrix):
+        # X.shape : (K, K) k is # of clients 
+        
+        dist_matrix[dist_matrix < 0] = 0
+
+        mds = MDS(n_components=self.MDS_DIM,
+          dissimilarity='precomputed', # Crucial: tells MDS you're providing a distance matrix
+          random_state=42,
+          normalized_stress='auto')
+
+        client_features = mds.fit_transform(dist_matrix)
+        
+        X = client_features.T
+        cntr, Y, u0, d, jm, p, fpc = fuzz.cluster.cmeans(
+            X,
+            c=self.fuzzy_clusters,
+            m=2,
+            error=0.005,
+            maxiter=1000,
+            init=None,
+            seed=42
+        )
+
+        self.labels_ = [[] for _ in range(Y.shape[1])]
+        for client_idx in range(Y.shape[1]):
+            memberships = Y[:, client_idx]
+            above_threshold_clusters = np.where(memberships > self.fuzzy_thr)[0]
+
+            if len(above_threshold_clusters) > 0:
+                for cluster_idx in above_threshold_clusters:
+                    self.labels_[client_idx].append(cluster_idx)
+            else:
+                best_cluster_idx = np.argmax(memberships)
+                self.labels_[client_idx].append(best_cluster_idx)
+
     def _fit_silhouette(self, X):
         """Find optimal clusters using silhouette score"""
         silhouette_scores = []

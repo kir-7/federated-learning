@@ -26,14 +26,16 @@ This will be used for clustering based on model state, this approach requires to
 @dataclass
 class FedStateClusterConfig:
     n_clients: int = 10
-    n_clusters: int = 2
+    n_clusters: int = 1
+    max_clusters : int = 2
+    fuzz_clusters : int = 1  # set it to 1 if not being used
     m: float = 1.0    # fraction of clients of each cluster that needs to be involved in training
     
     method: str = 'dirichlet'
     dirichlet_alpha: float = 0.3
     dataset: str = "cifar10"    
-    partition_column : str = 'label'
     n_classes : int = 10
+    model : str = 'mnist'
 
     client_bs: int = 32
     global_bs: int = 32
@@ -54,6 +56,8 @@ class FedStateClusterConfig:
     # Agglomarative clustering parameters
     aggl_method : str = 'silhouette'
     aggl_linkage : str = 'ward' 
+    fuzzy_thr : float=0.8
+    
 
     cluster_every : int  = 3
     start_recluster : int = 20
@@ -73,13 +77,13 @@ class FedStateCluster:
         self.global_rounds = config.global_rounds
                 
         self.logger = {} 
+        self.similarity_logs = {}
         
         self.client_partitions_test = client_partitions_test
         self.client_partitions_train = client_parition_train
         self.global_test_partition = global_test_partition
 
         self.setup_dataset()
-
         
         # first create models for all clients
         self.setup_models()
@@ -100,9 +104,9 @@ class FedStateCluster:
     
     def setup_models(self):
         # Create models for each cluster and move to device
-        if self.config.dataset == 'mnist' or self.config.dataset == 'rotmnist' or self.config.dataset == 'flwrlabs/femnist':
+        if self.config.model == 'mnist':
             self.models = [MNISTModel(n_classes=self.config.n_classes).to(self.device) for _ in range(self.config.n_clients)]
-        else:
+        if self.config.model == 'resnet':
             self.models = [ResnetModel(n_classes=self.config.n_classes).to(self.device) for _ in range(self.config.n_clients)]        
         self.criterion = nn.CrossEntropyLoss().to(self.device)
 
@@ -122,12 +126,16 @@ class FedStateCluster:
             metric='precomputed',
             linkage='complete', # mostly will be `complete`
             min_clusters=2,  # if clustering based on model state then before starting mostly all models should be in same cluster, then they should start to diverge  
-            max_clusters = min(10, self.config.n_clients-1)
+            max_clusters = self.config.max_clusters if self.config.n_clusters > 1 else 2,
+            fuzzy_clusters=self.config.fuzz_clusters,
+            fuzzy_thr=self.config.fuzzy_thr
         )
-        
+
         self.labels_ = aggl_clusterer.fit_predict(distance_matrix)
         self.aggl_model = aggl_clusterer
-        self.config.n_clusters = max(self.labels_)+1
+        
+        self.config.n_clusters = self.config.fuzz_clusters
+    
 
         return self.labels_
 
@@ -147,7 +155,7 @@ class FedStateCluster:
         self.config.n_clusters = 1
         self.clusters = {0:list(range(self.config.n_clients))}
 
-    def assign_cluster_model_conv(self):
+    def assign_cluster_model_conv(self, gb_round):
         '''
         assign each of n clients to p clusters
         APPROACH: assign based on the model's state, this will be called every few global rounds to recluster the clients   
@@ -158,14 +166,22 @@ class FedStateCluster:
         flattend_states = [self.flatten(model_state) for model_state in model_states]
 
         similarities = self.pairwise_similarity(flattend_states)
+        self.similarity_logs[gb_round] = similarities.tolist()
                 
         assigned_clusters = self.create_agglomarative_clusters(similarities)
 
         # assign new clusters
         self.clusters = {i: [] for i in range(self.config.n_clusters)}
-        for client in range(self.n_clients):
-            self.clusters[assigned_clusters[client]].append(client)        
         
+        if not self.config.fuzz_clusters > 1:
+            for client in range(self.n_clients):
+                self.clusters[assigned_clusters[client]].append(client)   
+
+        else:
+            for client in range(self.n_clients):
+                for assgn_cl in assigned_clusters[client]:
+                    self.clusters[assgn_cl].append(client)
+
         if self.config.verbose:
             print(f"Finished clustering clients.\nCluster Assignment: {self.clusters}")            
 
@@ -339,9 +355,10 @@ class FedStateCluster:
                     for client in self.clusters[cl]: self.models[client].load_state_dict(aggregated_model_state)                                                    
                                 
             # after all clusters are trained then re cluster this round if allowed            
-            if round_num % self.config.cluster_every == 0 and round_num >= self.config.start_recluster:
+            if self.config.max_clusters > 1 and round_num % self.config.cluster_every == 0 and round_num >= self.config.start_recluster:
                 print(f"Round: {round_num} --- Reclustering")
-                self.assign_cluster_model_conv()
+                # at this stage each client has been trained on their data for this round not aggregated yet
+                self.assign_cluster_model_conv(round_num)
     
                 for cl in range(self.config.n_clusters):
                     aggregated_model_state = self.cluster_fed_avg([self.models[client] for client in self.clusters[cl]])    
