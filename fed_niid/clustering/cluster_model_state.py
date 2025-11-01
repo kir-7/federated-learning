@@ -3,21 +3,15 @@ from torch import nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
 
-from torchvision import transforms
 from datasets import load_dataset
 
-
 import numpy as np
-from scipy.stats import wasserstein_distance
-from scipy.spatial.distance import squareform
-from sklearn.cluster import KMeans, DBSCAN
-from sklearn.preprocessing import StandardScaler
 from autoAgglo import AutoAgglomerativeClustering
 
 from dataclasses import dataclass
 from tqdm.auto import tqdm
 from copy import deepcopy
-from models import MNISTModel, CIFAR10Model, ResnetModel
+from models import MNISTModel, ResnetModel
 
 '''
 This will be used for clustering based on model state, this approach requires to maintain a seperate client model all the time.  
@@ -122,20 +116,17 @@ class FedStateCluster:
         distance_matrix = 1 - similarities
         
         aggl_clusterer = AutoAgglomerativeClustering(
-            method='silhouette',
+            method=self.config.aggl_method,
             metric='precomputed',
             linkage='complete', # mostly will be `complete`
             min_clusters=2,  # if clustering based on model state then before starting mostly all models should be in same cluster, then they should start to diverge  
-            max_clusters = self.config.max_clusters if self.config.n_clusters > 1 else 2,
-            fuzzy_clusters=self.config.fuzz_clusters,
-            fuzzy_thr=self.config.fuzzy_thr
+            max_clusters = self.config.max_clusters if self.config.n_clusters > 1 else 2            
         )
 
         self.labels_ = aggl_clusterer.fit_predict(distance_matrix)
         self.aggl_model = aggl_clusterer
-        
-        self.config.n_clusters = self.config.fuzz_clusters
     
+        self.config.n_clusters = max(self.labels_)+1
 
         return self.labels_
 
@@ -173,15 +164,10 @@ class FedStateCluster:
         # assign new clusters
         self.clusters = {i: [] for i in range(self.config.n_clusters)}
         
-        if not self.config.fuzz_clusters > 1:
-            for client in range(self.n_clients):
-                self.clusters[assigned_clusters[client]].append(client)   
+        for client in range(self.n_clients):
+            self.clusters[assigned_clusters[client]].append(client)   
 
-        else:
-            for client in range(self.n_clients):
-                for assgn_cl in assigned_clusters[client]:
-                    self.clusters[assgn_cl].append(client)
-
+     
         if self.config.verbose:
             print(f"Finished clustering clients.\nCluster Assignment: {self.clusters}")            
 

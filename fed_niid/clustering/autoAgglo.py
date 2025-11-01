@@ -17,7 +17,7 @@ class AutoAgglomerativeClustering:
     """
     
     def __init__(self, method='silhouette', linkage='ward', 
-                 min_clusters=2, max_clusters=10, metric='euclidean', fuzzy_clusters=3, fuzzy_thr=0.8):
+                 min_clusters=2, max_clusters=10, metric='euclidean', fuzzy_clusters=3, fuzzy_thr=0.8, MDS_DIM=20):
         """
         Parameters:
         -----------
@@ -46,7 +46,7 @@ class AutoAgglomerativeClustering:
         self.linkage_matrix_ = None
         self.fuzzy_clusters = fuzzy_clusters
         self.fuzzy_thr = fuzzy_thr
-        self.MDS_DIM = 20
+        self.MDS_DIM = MDS_DIM
         self.scores_ = {}
         
     def fit(self, X):
@@ -60,7 +60,7 @@ class AutoAgglomerativeClustering:
             self._fit_gap_statistic(X)
         elif self.method == 'dendrogram':
             self._fit_dendrogram(X)
-        elif self.methid == 'fuzzy_cmeans':
+        elif self.method == 'fuzzy_cmeans':
             self._fuzzy_Cmeans(X)
         else:
             raise ValueError(f"Unknown method: {self.method}")
@@ -93,7 +93,7 @@ class AutoAgglomerativeClustering:
         self.labels_ = [[] for _ in range(Y.shape[1])]
         for client_idx in range(Y.shape[1]):
             memberships = Y[:, client_idx]
-            above_threshold_clusters = np.where(memberships > self.fuzzy_thr)[0]
+            above_threshold_clusters = np.where(memberships >= self.fuzzy_thr)[0]
 
             if len(above_threshold_clusters) > 0:
                 for cluster_idx in above_threshold_clusters:
