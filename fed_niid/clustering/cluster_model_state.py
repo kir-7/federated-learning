@@ -8,10 +8,16 @@ from datasets import load_dataset
 import numpy as np
 from autoAgglo import AutoAgglomerativeClustering
 
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from tqdm.auto import tqdm
 from copy import deepcopy
 from models import MNISTModel, ResnetModel
+
+import math
+
+import copy
+import json
+
 
 '''
 This will be used for clustering based on model state, this approach requires to maintain a seperate client model all the time.  
@@ -57,6 +63,7 @@ class FedStateClusterConfig:
     start_recluster : int = 20
     local_eval_every : int  = 3
 
+
     verbose: bool = True
 
 class FedStateCluster:
@@ -85,7 +92,6 @@ class FedStateCluster:
         # then assign those models to clusters
         self.initialize_clusters()
 
-
     def setup_dataset(self):        
         
         # Make this more flexible for different datasets
@@ -104,9 +110,11 @@ class FedStateCluster:
             self.models = [ResnetModel(n_classes=self.config.n_classes).to(self.device) for _ in range(self.config.n_clients)]        
         self.criterion = nn.CrossEntropyLoss().to(self.device)
 
-    def global_scheduler(self, round_num):
+    def global_scheduler(self, round_num, y2=1.0, y1=0.0):
         # simple: every 2 global rounds multiple the lr by a factor of 0.9  
         return self.config.client_lr * (0.9**(round_num//2))
+        # simulate one cycle LR
+        # return self.config.client_lr * max((1 - math.cos(round_num * math.pi / self.config.global_rounds)) / 2, 0) * (y2 - y1) + y1
 
     def create_agglomarative_clusters(self, similarities):
         '''
@@ -317,7 +325,7 @@ class FedStateCluster:
                 print(f"\n=== Global Round {round_num + 1}/{self.config.global_rounds} ===")
             
             result = {}
-
+            
             for cl in range(self.config.n_clusters):
                 if not self.clusters[cl]:  # Skip empty clusters
                     continue            
@@ -325,7 +333,7 @@ class FedStateCluster:
                 # Select clients for this round
                 m = max(int(self.config.m * len(self.clusters[cl])), 1)
                 selected_clients = np.random.choice(self.clusters[cl], m, replace=False).tolist()
-                                
+             
                 # Train selected clients
                 for client in selected_clients:
                     lr = self.global_scheduler(round_num)
@@ -379,6 +387,10 @@ class FedStateCluster:
             
             history.append(result)
         
-            self.logger[round_num] = {"cluster":self.clusters, **result}            
+            self.logger[round_num] = {"cluster":self.clusters, **result}    
+
+            if round_num % 5 == 0:        
+                with open(f"/content/rot_emnist_50_clients_100_participation_niid_sim_logs_global_eval_round_{round_num}.json", 'w') as f:
+                    json.dump({"logs":copy.deepcopy(self.logger),"similarity_logs":self.similarity_logs, "config":asdict(self.config)}, f, default=str)
 
         return history, self.clusters
