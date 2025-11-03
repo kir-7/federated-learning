@@ -343,6 +343,9 @@ class FedStateCluster:
                     
                     result[f'client_{client}'] = train_res
                 
+                # log the selected clients for this cluster
+                result['selected_clients'][cl] = selected_clients.tolist()
+                
                 # aggregate
                 if round_num % self.config.cluster_every != 0 or round_num < self.config.start_recluster:
                     aggregated_model_state = self.cluster_fed_avg([self.models[client] for client in selected_clients])
@@ -366,16 +369,27 @@ class FedStateCluster:
                 for cl in range(self.config.n_clusters):
                     client_evals = []
                     for client in self.clusters[cl]:
-                        if client in self.client_loaders_test: 
+                        # only evaluate this client if it was used for this round of training
+                        if client in self.client_loaders_test and (client in result['selected_clients'][cl] or round_num % 10 == 0): 
                             eval_res = self.evaluate(client, cl, self.models[client], self.client_loaders_test[client])
+
+                            # if this client was not selected this round...
+                            if f'client_{client}' not in result:    result[f'client_{client}'] = {}
+
                             result[f'client_{client}'].update(**eval_res)
+
                             client_evals.append(eval_res['val_acc'])
 
                     cluster_evals.append(sum(client_evals)/len(client_evals))
                 
                 # report the average client performance across all clusters this might be more important than global test loader performance
-                print(f"Average all clients performance: {sum(cluster_evals)/len(cluster_evals)}")            
-                result.update({"average_acc":sum(cluster_evals)/len(cluster_evals)})
+                if round_num % 10 == 0:
+                    print(f"Average all clients performance: {sum(cluster_evals)/len(cluster_evals)}")            
+                    result.update({"average_acc_all":sum(cluster_evals)/len(cluster_evals)})
+            
+                else:
+                    print(f"Average selected clients performance: {sum(cluster_evals)/len(cluster_evals)}")
+                    result.update({"average_acc_selected":sum(cluster_evals)/len(cluster_evals)})
             
             # for each data sample in the global test set we obtain the highest probable class from each cluster and then pick the highest probable among those and verify it with ground truth
             # This global evaluation is not really that important in Model state based clusteirng
