@@ -8,8 +8,6 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.datasets import make_blobs
 from sklearn.manifold import MDS
 
-import skfuzzy as fuzz
-
 
 class AutoAgglomerativeClustering:
     """
@@ -68,6 +66,7 @@ class AutoAgglomerativeClustering:
         return self
 
     def _fuzzy_Cmeans(self, dist_matrix):
+        import skfuzzy as fuzz
         # X.shape : (K, K) k is # of clients 
         
         dist_matrix[dist_matrix < 0] = 0

@@ -28,7 +28,8 @@ class FedStateClusterConfig:
     n_clients: int = 10
     n_clusters: int = 1
     max_clusters : int = 2
-    fuzz_clusters : int = 1  # set it to 1 if not being used
+    min_clusters : int = 3
+    # fuzz_clusters : int = 1  # set it to 1 if not being used
     m: float = 1.0    # fraction of clients of each cluster that needs to be involved in training
     
     method: str = 'dirichlet'
@@ -56,13 +57,12 @@ class FedStateClusterConfig:
     # Agglomarative clustering parameters
     aggl_method : str = 'silhouette'
     aggl_linkage : str = 'ward' 
-    fuzzy_thr : float=0.8
+    # fuzzy_thr : float=0.8
     
 
     cluster_every : int  = 3
     start_recluster : int = 20
     local_eval_every : int  = 3
-
 
     verbose: bool = True
 
@@ -127,8 +127,8 @@ class FedStateCluster:
             method=self.config.aggl_method,
             metric='precomputed',
             linkage='complete', # mostly will be `complete`
-            min_clusters=2,  # if clustering based on model state then before starting mostly all models should be in same cluster, then they should start to diverge  
-            max_clusters = self.config.max_clusters if self.config.n_clusters > 1 else 2            
+            min_clusters=self.config.min_clusters,  # if clustering based on model state then before starting mostly all models should be in same cluster, then they should start to diverge  
+            max_clusters = self.config.max_clusters     
         )
 
         self.labels_ = aggl_clusterer.fit_predict(distance_matrix)
@@ -325,14 +325,17 @@ class FedStateCluster:
                 print(f"\n=== Global Round {round_num + 1}/{self.config.global_rounds} ===")
             
             result = {}
-            
+            result['selected_clients'] = {}
+            all_trained_clients = []
             for cl in range(self.config.n_clusters):
+                
                 if not self.clusters[cl]:  # Skip empty clusters
                     continue            
 
                 # Select clients for this round
                 m = max(int(self.config.m * len(self.clusters[cl])), 1)
                 selected_clients = np.random.choice(self.clusters[cl], m, replace=False).tolist()
+                all_trained_clients.extend(selected_clients)
              
                 # Train selected clients
                 for client in selected_clients:
@@ -344,67 +347,85 @@ class FedStateCluster:
                     result[f'client_{client}'] = train_res
                 
                 # log the selected clients for this cluster
-                result['selected_clients'][cl] = selected_clients.tolist()
-                
-                # aggregate
-                if round_num % self.config.cluster_every != 0 or round_num < self.config.start_recluster:
-                    aggregated_model_state = self.cluster_fed_avg([self.models[client] for client in selected_clients])
-                    for client in self.clusters[cl]: self.models[client].load_state_dict(aggregated_model_state)                                                    
-                                
-            # after all clusters are trained then re cluster this round if allowed            
-            if self.config.max_clusters > 1 and round_num % self.config.cluster_every == 0 and round_num >= self.config.start_recluster:
-                print(f"Round: {round_num} --- Reclustering")
+            result['selected_clients'] = all_trained_clients
+            
+            is_recluster_round = (self.config.max_clusters > 1 and  round_num % self.config.cluster_every == 0 and  round_num >= self.config.start_recluster)
+
+            # after all clusters are trained then re cluster this round if allowed                        
+            if is_recluster_round:
+                print(f"Round: {round_num} --- Reclustering")                
                 # at this stage each client has been trained on their data for this round not aggregated yet
                 self.assign_cluster_model_conv(round_num)
-    
-                for cl in range(self.config.n_clusters):
-                    aggregated_model_state = self.cluster_fed_avg([self.models[client] for client in self.clusters[cl]])    
-                    for client in self.clusters[cl]: self.models[client].load_state_dict(aggregated_model_state)
-                                                    
+
+
+            for cl_id, client_ids_in_cluster in self.clusters.items():
+                # Aggregate ONLY the models of clients that were trained this round
+                # and belong to the current cluster.
+                models_to_aggregate = [
+                    self.models[client_id] for client_id in client_ids_in_cluster 
+                    if client_id in all_trained_clients
+                ]
+                if not models_to_aggregate:
+                    continue 
+
+                aggregated_model_state = self.cluster_fed_avg(models_to_aggregate)
+                
+                # Distribute the aggregated model to ALL clients in the cluster
+                for client_id in client_ids_in_cluster:
+                    self.models[client_id].load_state_dict(aggregated_model_state)
+                           
             # Evaluate clients on their test sets if test set exists (independed test set does not exist for femnist)
             # evaluate each client only once every 3 global itertions
             if round_num % self.config.local_eval_every == 0 or round_num == self.config.global_rounds-1:
-                cluster_evals = []
-    
-                for cl in range(self.config.n_clusters):
-                    client_evals = []
-                    for client in self.clusters[cl]:
-                        # only evaluate this client if it was used for this round of training
-                        if client in self.client_loaders_test and (client in result['selected_clients'][cl] or round_num % 10 == 0): 
-                            eval_res = self.evaluate(client, cl, self.models[client], self.client_loaders_test[client])
 
-                            # if this client was not selected this round...
-                            if f'client_{client}' not in result:    result[f'client_{client}'] = {}
-
-                            result[f'client_{client}'].update(**eval_res)
-
-                            client_evals.append(eval_res['val_acc'])
-
-                    cluster_evals.append(sum(client_evals)/len(client_evals))
+                avg_acc_selected = []
+                avg_acc_all = [] # Will only be populated on full eval rounds
                 
-                # report the average client performance across all clusters this might be more important than global test loader performance
-                if round_num % 10 == 0:
-                    print(f"Average all clients performance: {sum(cluster_evals)/len(cluster_evals)}")            
-                    result.update({"average_acc_all":sum(cluster_evals)/len(cluster_evals)})
+                for client_id in range(self.n_clients):
+                    if client_id not in self.client_loaders_test:
+                        continue
+
+                    # evaluate this client if it was trained this round or if this round all clients are evaluated
+                    if client_id in all_trained_clients or ((round_num % 20 == 0 and round_num > 0) or round_num == self.config.global_rounds - 1):
+                        client_cluster = -1
+                        for cl, clients in self.clusters.items():
+                            if client_id in clients:
+                                client_cluster = cl
+                                break
+                        
+                        eval_res = self.evaluate(client_id, client_cluster, self.models[client_id], self.client_loaders_test[client_id])
+                        if f'client_{client_id}' not in result:
+                            result[f'client_{client_id}'] = {}
+                        result[f'client_{client_id}'].update(**eval_res)
+
+                        if client_id in all_trained_clients : avg_acc_selected.append(eval_res['val_acc'])
+                        if client_id in all_trained_clients or ((round_num % 20 == 0 and round_num > 0) or round_num == self.config.global_rounds - 1) : avg_acc_all.append(eval_res['val_acc'])
+
+
+                if avg_acc_selected:
+                    avg_selected = sum(avg_acc_selected) / len(avg_acc_selected)
+                    print(f"Average selected clients performance: {avg_selected:.2f}%")
+                    result["average_acc_selected"] = avg_selected
+                
+                if avg_acc_all:
+                    avg_all = sum(avg_acc_all) / len(avg_acc_all)
+                    print(f"Average all clients performance: {avg_all:.2f}%")
+                    result["average_acc_all"] = avg_all
+
             
-                else:
-                    print(f"Average selected clients performance: {sum(cluster_evals)/len(cluster_evals)}")
-                    result.update({"average_acc_selected":sum(cluster_evals)/len(cluster_evals)})
-            
-            # for each data sample in the global test set we obtain the highest probable class from each cluster and then pick the highest probable among those and verify it with ground truth
-            # This global evaluation is not really that important in Model state based clusteirng
             eval_global_res = self.evaluate_global(self.global_test_loader)
             result.update(**eval_global_res)
-
+        
             if self.config.verbose:
-                print(result)
+                # A more concise way to log cluster assignments
+                result['cluster_assignments'] = self.clusters
+                print(f"Cluster Assignments: {self.clusters}")
             
             history.append(result)
-        
-            self.logger[round_num] = {"cluster":self.clusters, **result}    
+            self.logger[round_num] = result   
 
-            if round_num % 5 == 0:        
-                with open(f"/content/rot_emnist_50_clients_100_participation_niid_sim_logs_global_eval_round_{round_num}.json", 'w') as f:
+            if round_num > 0 and round_num % 5 == 0:        
+                with open(f"checkpoints/{self.config.dataset}_{self.config.n_clients}_clients_{str(int(self.config.m * 100))}_participation_niid_sim_logs_global_eval_round_{round_num}.json", 'w') as f:
                     json.dump({"logs":copy.deepcopy(self.logger),"similarity_logs":self.similarity_logs, "config":asdict(self.config)}, f, default=str)
 
         return history, self.clusters

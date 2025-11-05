@@ -31,6 +31,30 @@ class SimpleDataset(torch.utils.data.Dataset):
         sample = {'img':x, 'label':y}
         return sample
     
+# simple dataset to take hf dataset as input and give img, label as output
+class FemnistDataset(torch.utils.data.Dataset):
+    def __init__(self, dataset, writer_id, transform=None):
+        super().__init__()
+
+        self.dataset = dataset
+        self.transform = transform
+        self.writer_id = writer_id
+
+        self.dataset.set_format('torch')
+        self.dataset.set_transform(self.apply_transforms)
+
+    def apply_transforms(self, examples):
+        examples["image"] = [self.transform(img) for img in examples["image"]]
+        return examples
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, index):
+
+        sample = self.dataset[index]
+        return {'img': sample['image'], "label": sample['character']}
+
 
 def split_noniid(train_idcs, train_labels, alpha, n_clients):
     '''
