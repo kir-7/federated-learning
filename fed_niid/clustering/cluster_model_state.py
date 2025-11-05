@@ -429,7 +429,7 @@ class FedStateCluster:
             history.append(result)
             self.logger[round_num] = result   
 
-            if round_num > 0 and round_num % 5 == 0:        
+            if (round_num > 0 and round_num % 5 == 0) or round_num == self.config.global_rounds - 1:        
                 with open(f"checkpoints/{self.config.dataset}_{self.config.n_clients}_clients_{str(int(self.config.m * 100))}_participation_niid_sim_logs_global_eval_round_{round_num}.json", 'w') as f:
                     json.dump({"logs":copy.deepcopy(self.logger),"similarity_logs":self.similarity_logs, "config":asdict(self.config)}, f, default=str)
 

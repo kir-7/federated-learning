@@ -34,7 +34,7 @@ class ResnetModel(nn.Module):
         return self.model(x)    
     
 class FemnistModel(torch.nn.Module):
-    def __init__(self, in_features=1, num_classes=62):
+    def __init__(self, in_features=1, n_classes=62):
         super().__init__()
         
         self.conv_layers = nn.Sequential(
@@ -50,7 +50,7 @@ class FemnistModel(torch.nn.Module):
             nn.ReLU(),
             nn.Linear(256, 64),
             nn.ReLU(),
-            nn.Linear(64, num_classes)
+            nn.Linear(64, n_classes)
         )
 
     def forward(self, x):
