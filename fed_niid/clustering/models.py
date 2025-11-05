@@ -33,19 +33,29 @@ class ResnetModel(nn.Module):
     def forward(self, x):
         return self.model(x)    
     
-class ConvModel(torch.nn.Module):
-    def __init__(self):
-        super(ConvModel, self).__init__()
-        self.conv1 = torch.nn.Conv2d(1, 6, 5)
-        self.pool = torch.nn.MaxPool2d(2, 2)
-        self.conv2 = torch.nn.Conv2d(6, 16, 5)
-        self.fc1 = torch.nn.Linear(16 * 4 * 4, 62)
+class FemnistModel(torch.nn.Module):
+    def __init__(self, in_features=1, num_classes=62):
+        super().__init__()
+        
+        self.conv_layers = nn.Sequential(
+            Conv(c_in=in_features, c_out=32, k=5),
+            Conv(32, 32, k=3, s=2),   # 14x14
+            Conv(32, 64, 3),
+            Conv(64, 64, 3, 2),  # 7x7   
+        )
+
+        self.fc = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(64*7*7, 256),
+            nn.ReLU(),
+            nn.Linear(256, 64),
+            nn.ReLU(),
+            nn.Linear(64, num_classes)
+        )
 
     def forward(self, x):
-        x = self.pool(F.relu(self.conv1(x)))
-        x = self.pool(F.relu(self.conv2(x)))
-        x = x.view(-1, 16 * 4 * 4)
-        x = self.fc1(x)
+        x = self.conv_layers(x)
+        x = self.fc(x)
         return x
 
 class CIFAR10Model(nn.Module):

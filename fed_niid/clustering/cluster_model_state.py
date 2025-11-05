@@ -11,7 +11,7 @@ from autoAgglo import AutoAgglomerativeClustering
 from dataclasses import dataclass, asdict
 from tqdm.auto import tqdm
 from copy import deepcopy
-from models import MNISTModel, ResnetModel
+from models import MNISTModel, ResnetModel, FemnistModel
 
 import math
 
@@ -108,6 +108,8 @@ class FedStateCluster:
             self.models = [MNISTModel(n_classes=self.config.n_classes).to(self.device) for _ in range(self.config.n_clients)]
         if self.config.model == 'resnet':
             self.models = [ResnetModel(n_classes=self.config.n_classes).to(self.device) for _ in range(self.config.n_clients)]        
+        if self.config.model == 'femnist':
+            self.models = [FemnistModel(n_classes=self.config.n_classes).to(self.device) for _ in range(self.config.n_clients)]
         self.criterion = nn.CrossEntropyLoss().to(self.device)
 
     def global_scheduler(self, round_num, y2=1.0, y1=0.0):
@@ -344,7 +346,8 @@ class FedStateCluster:
                         client, self.models[client], lr, self.client_loaders_train[client]
                     )
                     
-                    result[f'client_{client}'] = train_res
+                    # dont store the train results, logger becomes too large
+                    # result[f'client_{client}'] = train_res
                 
                 # log the selected clients for this cluster
             result['selected_clients'] = all_trained_clients
@@ -394,9 +397,11 @@ class FedStateCluster:
                                 break
                         
                         eval_res = self.evaluate(client_id, client_cluster, self.models[client_id], self.client_loaders_test[client_id])
-                        if f'client_{client_id}' not in result:
-                            result[f'client_{client_id}'] = {}
-                        result[f'client_{client_id}'].update(**eval_res)
+                        
+                        # NOTE: Dont store client results as well, logger becomes too large, I might regret this later ....
+                        # if f'client_{client_id}' not in result:
+                        #     result[f'client_{client_id}'] = {}
+                        # result[f'client_{client_id}'].update(**eval_res)
 
                         if client_id in all_trained_clients : avg_acc_selected.append(eval_res['val_acc'])
                         if client_id in all_trained_clients or ((round_num % 20 == 0 and round_num > 0) or round_num == self.config.global_rounds - 1) : avg_acc_all.append(eval_res['val_acc'])
