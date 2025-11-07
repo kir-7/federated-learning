@@ -141,8 +141,8 @@ class FedStateCluster:
         return self.labels_
 
     @staticmethod
-    def flatten(source : dict):
-        return torch.cat([value.flatten() for value in source.values()])
+    def flatten(source):
+        return torch.cat([value.flatten() for value in source])
 
     @staticmethod
     def pairwise_similarity(vectors):        
@@ -162,7 +162,7 @@ class FedStateCluster:
         APPROACH: assign based on the model's state, this will be called every few global rounds to recluster the clients   
         '''
         
-        model_states = [model.state_dict() for model in self.models]
+        model_states = [model.parameters() for model in self.models]
 
         flattend_states = [self.flatten(model_state) for model_state in model_states]
 
@@ -185,26 +185,25 @@ class FedStateCluster:
     def cluster_fed_avg(local_models):
         if not local_models:
             return
-            
+        
+        # NOTE: So stupid, the aggregation should be done on parameters not state dict, which i already new, but i believed online resource over my intuition
+
         # Get the state_dict of the first local model to initialize the average
-        avg_state_dict = deepcopy(local_models[0].state_dict())
+        avg_wts = {}
         
-        # Sum the state_dicts of all other models
-        for i in range(1, len(local_models)):
-            local_state_dict = local_models[i].state_dict()
-            for key in avg_state_dict:
-                avg_state_dict[key] += local_state_dict[key]
+        # Sum the wts of all other models
+        for i in range(len(local_models)):
+            local_wts = local_models[i].named_parameters()
+            for key, param in local_wts:
+                if param.requires_grad:
+                    avg_wts[key] += param
                 
-        # Average the state_dict
-        for key in avg_state_dict:
-            # NOTE: Tensors like 'num_batches_tracked' in BatchNorm should not be averaged.
-            # They are integers. We can just keep the one from the last model.
-            # A simple check for floating point type ensures we only average weights, biases, and running stats.
-            if avg_state_dict[key].dtype == torch.float32 or avg_state_dict[key].dtype == torch.float64:
-                avg_state_dict[key] = torch.div(avg_state_dict[key], len(local_models))
+        # Average the wts
+        for key in avg_wts:
+            avg_wts[key] = torch.div(avg_wts[key], len(local_models))
         
-        # return th aggregated state dict
-        return avg_state_dict 
+        # return the aggregated weights
+        return avg_wts
 
     @torch.inference_mode()
     def evaluate_global(self, dataloader):
@@ -371,11 +370,13 @@ class FedStateCluster:
                 if not models_to_aggregate:
                     continue 
 
-                aggregated_model_state = self.cluster_fed_avg(models_to_aggregate)
+                aggregated_wts = self.cluster_fed_avg(models_to_aggregate)
                 
                 # Distribute the aggregated model to ALL clients in the cluster
                 for client_id in client_ids_in_cluster:
-                    self.models[client_id].load_state_dict(aggregated_model_state)
+                    for name, param in self.models[client_id]: 
+                        if param.requires_grad:
+                            param.data = aggregated_wts[name]
                            
             # Evaluate clients on their test sets if test set exists (independed test set does not exist for femnist)
             # evaluate each client only once every 3 global itertions
