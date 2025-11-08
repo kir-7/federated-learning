@@ -63,7 +63,9 @@ class FedStateClusterConfig:
     cluster_every : int  = 3
     start_recluster : int = 20
     local_eval_every : int  = 3
+    swap_dist_every : int = 8
 
+    log_dir : str = "checkpoints"
     verbose: bool = True
 
 class FedStateCluster:
@@ -108,7 +110,7 @@ class FedStateCluster:
             self.models = [MNISTModel(n_classes=self.config.n_classes).to(self.device) for _ in range(self.config.n_clients)]
         if self.config.model == 'resnet':
             self.models = [ResnetModel(n_classes=self.config.n_classes).to(self.device) for _ in range(self.config.n_clients)]        
-        if self.config.model == 'femnist':
+        if self.config.model == 'cnn':
             self.models = [FemnistModel(n_classes=self.config.n_classes).to(self.device) for _ in range(self.config.n_clients)]
         self.criterion = nn.CrossEntropyLoss().to(self.device)
 
@@ -144,12 +146,13 @@ class FedStateCluster:
     def flatten(source):
         return torch.cat([value.flatten() for value in source])
 
+    # NOTE: this might not work with named_parameters() approach     
     @staticmethod
     def pairwise_similarity(vectors):        
         # get angles between all vector pairs
         norm_vectors = F.normalize(torch.stack(vectors), p=2, dim=1)
         angles = norm_vectors @ norm_vectors.T
-        return angles.cpu().numpy()
+        return angles.detach().cpu().numpy()
     
     def initialize_clusters(self):        
         print("Initializing with a single cluster for all clients.")
@@ -188,19 +191,9 @@ class FedStateCluster:
         
         # NOTE: So stupid, the aggregation should be done on parameters not state dict, which i already new, but i believed online resource over my intuition
 
-        # Get the state_dict of the first local model to initialize the average
-        avg_wts = {}
-        
-        # Sum the wts of all other models
-        for i in range(len(local_models)):
-            local_wts = local_models[i].named_parameters()
-            for key, param in local_wts:
-                if param.requires_grad:
-                    avg_wts[key] += param
-                
-        # Average the wts
-        for key in avg_wts:
-            avg_wts[key] = torch.div(avg_wts[key], len(local_models))
+        wts_dict = [{name:param for name, param in local_model.named_parameters()} for local_model in local_models]
+
+        avg_wts = {name : torch.mean(torch.stack([wt[name] for wt in wts_dict], dim=0), dim=0) for name in wts_dict[0].keys()}
         
         # return the aggregated weights
         return avg_wts
@@ -320,7 +313,7 @@ class FedStateCluster:
 
         history = []        
 
-        for round_num in range(self.config.global_rounds):
+        for round_num in range(self.config.global_rounds):                       
             
             if self.config.verbose:
                 print(f"\n=== Global Round {round_num + 1}/{self.config.global_rounds} ===")
@@ -374,9 +367,9 @@ class FedStateCluster:
                 
                 # Distribute the aggregated model to ALL clients in the cluster
                 for client_id in client_ids_in_cluster:
-                    for name, param in self.models[client_id]: 
+                    for name, param in self.models[client_id].named_parameters(): 
                         if param.requires_grad:
-                            param.data = aggregated_wts[name]
+                            param.data.copy_(aggregated_wts[name])
                            
             # Evaluate clients on their test sets if test set exists (independed test set does not exist for femnist)
             # evaluate each client only once every 3 global itertions
@@ -422,6 +415,18 @@ class FedStateCluster:
             eval_global_res = self.evaluate_global(self.global_test_loader)
             result.update(**eval_global_res)
         
+            # once every few rounds, swap the distributions of any 2 random clients, to simulate data drift
+            if round_num > 0 and round_num % self.config.swap_dist_every == 0:
+                r_client_1, r_client_2 = np.random.choice(a=self.config.n_clients, size=2, replace=False)
+                
+                self.client_partitions_train[r_client_1], self.client_partitions_train[r_client_2] = self.client_partitions_train[r_client_2], self.client_partitions_train[r_client_1]
+                self.client_loaders_train[r_client_1], self.client_loaders_train[r_client_2] = self.client_loaders_train[r_client_2], self.client_loaders_train[r_client_1]
+                
+                self.client_partitions_test[r_client_1], self.client_partitions_test[r_client_2] = self.client_partitions_test[r_client_2], self.client_partitions_test[r_client_1]
+                self.client_loaders_test[r_client_1], self.client_loaders_test[r_client_2] = self.client_loaders_test[r_client_2], self.client_loaders_test[r_client_1]
+                                
+                print(f"Swapped distributions of clients: {r_client_1} & {r_client_2}")
+
             if self.config.verbose:
                 # A more concise way to log cluster assignments
                 result['cluster_assignments'] = self.clusters
@@ -431,7 +436,7 @@ class FedStateCluster:
             self.logger[round_num] = result   
 
             if (round_num > 0 and round_num % 5 == 0) or round_num == self.config.global_rounds - 1:        
-                with open(f"checkpoints/{self.config.dataset}_{self.config.n_clients}_clients_{str(int(self.config.m * 100))}_participation_niid_sim_logs_global_eval_round_{round_num}.json", 'w') as f:
+                with open(f"{self.config.log_dir}/{self.config.dataset}_{self.config.n_clients}_clients_{str(int(self.config.m * 100))}_participation_niid_sim_logs_global_eval_round_{round_num}.json", 'w') as f:
                     json.dump({"logs":copy.deepcopy(self.logger),"similarity_logs":self.similarity_logs, "config":asdict(self.config)}, f, default=str)
 
         return history, self.clusters
