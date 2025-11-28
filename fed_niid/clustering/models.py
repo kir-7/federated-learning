@@ -64,33 +64,26 @@ class CIFAR10Model(nn.Module):
 
         self.n_classes = n_classes
 
-        self.blocks = nn.ModuleList([
-            nn.Sequential(*[
-                Conv(in_channels, 32, 3, 2),    # /2
-                Conv(32, 64, 3, 2),    # /4
-                Conv(64, 128, 3, 1),   # /4
-            ]),
-            nn.Sequential(*[
-                Conv(128, 128, 3, 2),    # /8
-                Conv(128, 64, 3, 1),    # /8
-                Conv(64, 64, 3, 1),     # /8                
-            ])
-        ])
+        self.conv_layers = nn.Sequential(
+            Conv(c_in=in_channels, c_out=32, k=5),
+            Conv(32, 32, k=3, s=2),   # 16x16
+            Conv(32, 64, 3),
+            Conv(64, 64, 3, 2),  # 8x8
+        )
 
-        self.blocks = nn.Sequential(Conv(3, 32, 3, 2), Conv(32, 64, 3, 2), Conv(64, 128, 3, 1), Conv(128, 64, 3, 2))
-
-        self.pool = nn.AdaptiveAvgPool2d(1)        
-
-        self.fc = nn.Sequential(nn.Flatten(1), nn.Linear(64, 32), nn.ReLU(), nn.Linear(32, n_classes))
-
+        self.fc = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(64*8*8, 256),
+            nn.ReLU(),
+            nn.Linear(256, 64),
+            nn.ReLU(),
+            nn.Linear(64, n_classes)
+        )
+       
     def forward(self, x):
-
-        for block in self.blocks:
-            x = block(x)        
-
-        x = self.pool(x)
-
-        return self.fc(x)
+        x = self.conv_layers(x)
+        x = self.fc(x)
+        return x
 
 
 class MNISTModel(nn.Module):

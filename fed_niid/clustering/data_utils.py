@@ -25,7 +25,24 @@ class SimpleDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, index):
         x, y = self.data[index]
+        if self.transform:
+            x = self.transform(x)
+        sample = {'img':x, 'label':y}
+        return sample
 
+class FlwrMNISTDataset(torch.utils.data.Dataset):
+    def __init__(self, data, client_id, transform=None):
+        super().__init__()
+        self.client_id = client_id
+        self.data = data
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, index):
+        x, y = self.data[index].values()
+        
         if self.transform:
             x = self.transform(x)
         sample = {'img':x, 'label':y}

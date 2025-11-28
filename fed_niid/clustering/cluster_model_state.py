@@ -188,9 +188,7 @@ class FedStateCluster:
     def cluster_fed_avg(local_models):
         if not local_models:
             return
-        
-        # NOTE: So stupid, the aggregation should be done on parameters not state dict, which i already new, but i believed online resource over my intuition
-
+                
         wts_dict = [{name:param for name, param in local_model.named_parameters()} for local_model in local_models]
 
         avg_wts = {name : torch.mean(torch.stack([wt[name] for wt in wts_dict], dim=0), dim=0) for name in wts_dict[0].keys()}
