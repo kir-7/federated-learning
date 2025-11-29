@@ -5,6 +5,8 @@ from torch.utils.data import DataLoader
 import numpy as np
 import networkx as nx
 import matplotlib.pyplot as plt
+import igraph as ig
+import leidenalg as la
 
 from dataclasses import dataclass, asdict
 from tqdm.auto import tqdm
@@ -12,7 +14,6 @@ from models import MNISTModel, ResnetModel, FemnistModel, CIFAR10Model
 
 import copy
 import json
-
 @dataclass
 class FedGraphConfig:
     n_clients: int = 10
@@ -23,8 +24,13 @@ class FedGraphConfig:
     dataset: str = "cifar10"    
     n_classes : int = 10
     model : str = 'mnist'
+    
+    algorithm : str = 'fed_g_prox'
     prox_lambda : float = 0.25
-    k_neighbours : float = 0.4 
+    k_neighbours : float = 0.4
+    ema_alpha : float = 0.85 
+
+    n_communities : int = 3
 
     client_bs: int = 32
     global_bs: int = 32
@@ -37,7 +43,8 @@ class FedGraphConfig:
 
     train_test_split : float = 0.8
     total_train_samples : int = 100000
-    total_test_samples : int = 20000    
+    total_test_samples : int = 20000  
+
     # seed
     torch_seed: int = 42
     np_seed: int = 43
@@ -129,7 +136,7 @@ class FedGraph:
         # better to have graph made of similarities, sim = e^(-dist)
         mean_dist = distance_mat.mean() 
         sigma = mean_dist if mean_dist > 0 else 1.0
-        self.graph = torch.exp(-distance_mat/sigma)
+        self.S_t = torch.exp(-distance_mat/sigma)
 
         # reverse-deleting
         # prune n*(n-1)/4 least weighted edges ( prune edges with less similarity score )
@@ -139,24 +146,50 @@ class FedGraph:
         new_graph = torch.zeros_like(self.graph)
         new_graph.scatter_(1, indices, vals)
         row_sums = new_graph.sum(dim=1, keepdim=True)
-        self.graph = new_graph / (row_sums + 1e-8)
+        self.S_t = new_graph / (row_sums + 1e-8)
+        
 
     def final_cluster(self):
         # after training is done, perform community detection and get the communities, these will be the final cluster graphs
         pass
 
+    def leiden(self):
 
-    def fed_avg(self):                
+        rows, cols = np.where(self.S_t.detach().cpu().numpy() > 0)
+        edges = zip(rows.tolist(), cols.tolist())
+        gr = ig.Graph()
+        gr.add_edges(edges)        
+        partitions = la.find_partition(gr, la.ModularityVertexPartition)
+
+        communities = {}
+        
+        for client_id in range(self.config.n_clients):
+            communities[client_id] = partitions[partitions.membership[client_id]] 
+
+        return communities
+    # approach 1: perform community detection, but smooth the adjecency matrix
+    def smooth_graph(self, round_num):         
+
+        A_t = self.build_graph()
+        
+        if round_num == 0: 
+            self.S_t = A_t            
+        else:
+            self.S_t = self.config.ema_alpha * A_t + (1-self.config.ema_alpha) * self.S_t        
+
+    # approach 1: perform community detection, with smoothed adjecency matrix    
+    def fed_hard_cls(self, communities):        
+
         wts_dict = [{name:param.data for name, param in model.named_parameters()} for model in self.models]
 
-        # self.graph is NxN and wts_dict is NxD
         avg_wts_all_models = {}
-        
-        for client_id in range(self.n_clients):
+
+        for client_id, community in communities.items():
             client_agg_weights = {}
             
             # Get the row of weights for this client: Shape [N_clients]
-            neighbor_weights = self.graph[client_id] 
+            neighbor_weights = torch.zeros(self.n_clients)
+            neighbor_weights.scatter_(0, community, self.S_t[client_id]) 
             
             for name in wts_dict[0].keys():
                 # stack params: shape [n_clients, *param_shape] [10, 64, 3, 3]
@@ -168,7 +201,85 @@ class FedGraph:
                 weighted_sum = torch.sum(stacked_params * reshaped_weights, dim=0)
                 
                 client_agg_weights[name] = weighted_sum
-       
+            
+            avg_wts_all_models[client_id] = client_agg_weights
+        
+        return avg_wts_all_models         
+    
+    def compute_F(self):
+        
+        # NOTE: Drawback: We have define how many communities we want.
+        F = torch.randn(self.config.n_clients, self.config.n_communities, requires_grad=True).to(self.device)
+        
+        optimizer = torch.optim.Adam(F, lr=2e-3, weight_decay=5e-4)
+
+        for epoch in range(self.config.compute_F_iter):
+            loss = torch.linalg.norm(self.S_t - torch.exp(-F @ F.T), ord='fro')
+            loss.backward()
+            optimizer.step()
+        
+        return F.detach().cpu()
+
+    # calculate F matrix which is the community association fr all nodes, using smoothed adjeency matrix             
+    def fed_soft_cls(self):
+        '''
+        This is used to compute community asscoiations for each node, and then use the F matrix to get the models for each community
+        This can be used as the last step of fed_g_prox which doesn't give the community assignment
+        '''
+        
+        F = self.compute_F().transpose()  # shape (n_communities, n_clients)
+        
+        wts_dict = [{name:param.data for name, param in model.named_parameters()} for model in self.models]
+
+        avg_wts_all_comm = {}
+
+        for community_id in range(self.config.n_communities):
+
+            clients_weights = F[community_id]  # shape (n_clients)
+            community_weights = {}
+
+            for name in wts_dict[0].keys():
+
+                # stack params: shape [n_clients, *param_shape] [10, 64, 3, 3]
+                stacked_params = torch.stack([wt[name] for wt in wts_dict], dim=0)
+                
+                view_shape = [-1] + [1] * (stacked_params.dim() - 1)
+                reshaped_weights = clients_weights.view(view_shape)              
+               
+                weighted_sum = torch.sum(stacked_params * reshaped_weights, dim=0)
+                
+                community_weights[name] = weighted_sum
+            
+            avg_wts_all_comm[community_id] = community_weights
+
+        return avg_wts_all_comm
+    
+    # Approach 0: general fed avg on a client graph based on edge weights
+    def fed_avg(self):                
+        wts_dict = [{name:param.data for name, param in model.named_parameters()} for model in self.models]
+
+        # graph is NxN and wts_dict is NxD
+        avg_wts_all_models = {}
+        
+        for client_id in range(self.n_clients):
+            client_agg_weights = {}
+            
+            # Get the row of weights for this client: Shape [N_clients]
+            neighbor_weights = self.S_t[client_id] 
+            
+            for name in wts_dict[0].keys():
+                # stack params: shape [n_clients, *param_shape] [10, 64, 3, 3]
+                stacked_params = torch.stack([wt[name] for wt in wts_dict], dim=0)
+                
+                view_shape = [-1] + [1] * (stacked_params.dim() - 1)
+                reshaped_weights = neighbor_weights.view(view_shape)              
+               
+                weighted_sum = torch.sum(stacked_params * reshaped_weights, dim=0)
+                
+                client_agg_weights[name] = weighted_sum
+            
+            avg_wts_all_models[client_id] = client_agg_weights
+
         # return the aggregated weights
         return avg_wts_all_models        
 
@@ -193,7 +304,9 @@ class FedGraph:
         avg_loss = test_loss / len(dataloader) if len(dataloader) > 0 else 0
         
         return {"val_acc": accuracy, "val_avg_loss": avg_loss}
-    
+
+
+    # FedProx based proximity loss for all methods 
     def train(self, client, prev_model_state, model, lr, dataloader):
         model.train()
         optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
@@ -255,11 +368,20 @@ class FedGraph:
                             
             result['selected_clients'] = all_trained_clients                                                                
            
-            # before federation, refine the graph
-            self.build_graph()
-
-            aggregated_wts_all_models = self.fed_avg()
+            if self.config.algorithm == 'fed_g_prox':
+                # before federation, refine the graph
+                self.build_graph()
+                aggregated_wts_all_models = self.fed_avg()
+            
+            elif self.config.algorithm == 'fed_g_hard_cls':
                 
+                self.smooth_graph(round_num)
+                communities = self.leiden()
+                aggregated_wts_all_models = self.fed_hard_cls(communities)
+
+            else:
+                raise ValueError(f"Config algorithm should be fed_g_prox | fed_g_hard_cls, got {self.config.algorithm}")
+
             for client_id, agg_wts in aggregated_wts_all_models.items():
                     for name, param in self.models[client_id].named_parameters(): 
                         if param.requires_grad:
@@ -318,14 +440,14 @@ class FedGraph:
 
             if (round_num > 0 and round_num % 5 == 0) or round_num == self.config.global_rounds - 1:        
                 with open(f"{self.config.log_dir}/{self.config.dataset}_{self.config.n_clients}_clients_{str(int(self.config.m * 100))}_participation_niid_sim_logs_global_eval_round_{round_num}.json", 'w') as f:                    
-                    json.dump({"logs":copy.deepcopy(self.logger),"similarity_logs":self.similarity_logs, "config":asdict(self.config)}, f, default=str)
+                    json.dump({"logs":copy.deepcopy(self.logger), "config":asdict(self.config)}, f, default=str)
         
         return history    
 
 
     def plot_graph(self, round_num):    
         plt.figure(figsize=(8, 6))
-        rows, cols = np.where(self.graph.detach().cpu().numpy() > 0)
+        rows, cols = np.where(self.S_t.detach().cpu().numpy() > 0)
         edges = zip(rows.tolist(), cols.tolist())
         gr = nx.Graph()
         gr.add_edges_from(edges)
