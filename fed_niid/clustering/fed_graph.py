@@ -28,7 +28,7 @@ class FedGraphConfig:
     algorithm : str = 'fed_g_prox'
     prox_lambda : float = 0.25
     k_neighbours : float = 0.4
-    ema_alpha : float = 0.85 
+    ema_alpha : float = 0.75 
 
     n_communities : int = 3
 
@@ -39,7 +39,7 @@ class FedGraphConfig:
     client_epochs: int = 5
     client_lr: float = 1e-4
     step_size : int = 2
-    lr_schd_gamma = 0.5
+    lr_schd_gamma : float = 0.5
 
     train_test_split : float = 0.8
     total_train_samples : int = 100000
@@ -50,6 +50,7 @@ class FedGraphConfig:
     np_seed: int = 43
     
     local_eval_every : int  = 3
+    start_graph : int = 10
     swap_dist_every : int = 8
 
     log_dir : str = "checkpoints"
@@ -75,6 +76,13 @@ class FedGraph:
         self.global_test_partition = global_test_partition
 
         self.setup_dataset()
+
+        self.data_size = {}
+        for i in range(self.n_clients):
+            self.data_size[i] = len(self.client_loaders_train[i])
+
+        total_datapoints = sum(v for v in self.data_size.values())
+        self.data_size = {k:v/total_datapoints for k, v in self.data_size.items()}     
 
         # first create models for all clients
         self.setup_models()
@@ -126,28 +134,34 @@ class FedGraph:
     def flatten(source):
         return torch.cat([value.flatten() for value in source])
     
-    def build_graph(self):
+    def build_graph(self, round_num):
         # setup client graph
 
         # use an adjecency matrix 
         model_states = torch.stack([self.flatten(model.parameters()).detach() for model in self.models])
-        distance_mat = torch.cdist(model_states, model_states, p=2).detach()  # shape: N x D
+        distance_mat = torch.cdist(model_states, model_states, p=2).detach()  # shape: N x N
                 
         # better to have graph made of similarities, sim = e^(-dist)
-        mean_dist = distance_mat.mean() 
-        sigma = mean_dist if mean_dist > 0 else 1.0
-        self.S_t = torch.exp(-distance_mat/sigma)
+        sigma = torch.quantile(distance_mat[distance_mat > 0], 0.5)
+        graph = torch.exp(-distance_mat/sigma)
+
+        # smooth with ema
+        if self.config.algorithm == "fed_g_hard_cls":
+            graph = self.smooth_graph(graph, round_num)            
 
         # reverse-deleting
-        # prune n*(n-1)/4 least weighted edges ( prune edges with less similarity score )
+        # prune edges ( prune edges with less similarity score )
         k = max(2, int(self.n_clients * self.config.k_neighbours))
-        vals, indices = torch.topk(self.graph, k=k, dim=1)
+        vals, indices = torch.topk(graph, k=k, dim=1)
         
-        new_graph = torch.zeros_like(self.graph)
+        new_graph = torch.zeros_like(graph)
+
         new_graph.scatter_(1, indices, vals)
+
         row_sums = new_graph.sum(dim=1, keepdim=True)
-        self.S_t = new_graph / (row_sums + 1e-8)
+        new_graph = new_graph / (row_sums + 1e-8)
         
+        return new_graph
 
     def final_cluster(self):
         # after training is done, perform community detection and get the communities, these will be the final cluster graphs
@@ -155,11 +169,17 @@ class FedGraph:
 
     def leiden(self):
 
+        # adj = 0.5 * (self.S_t + self.S_t.T)        
+
         rows, cols = np.where(self.S_t.detach().cpu().numpy() > 0)
-        edges = zip(rows.tolist(), cols.tolist())
-        gr = ig.Graph()
-        gr.add_edges(edges)        
-        partitions = la.find_partition(gr, la.ModularityVertexPartition)
+        weights = self.S_t.detach().cpu().numpy()[rows, cols]
+
+        edges = list(zip(rows.tolist(), cols.tolist()))
+        
+        gr = ig.Graph(n=self.n_clients, edges=list(edges))
+        gr.es['weight'] = weights
+
+        partitions = la.find_partition(gr, la.ModularityVertexPartition, weights=gr.es["weight"])
 
         communities = {}
         
@@ -168,14 +188,14 @@ class FedGraph:
 
         return communities
     # approach 1: perform community detection, but smooth the adjecency matrix
-    def smooth_graph(self, round_num):         
-
-        A_t = self.build_graph()
+    def smooth_graph(self, A_t, round_num):         
         
         if round_num == 0: 
-            self.S_t = A_t            
+            graph = A_t            
         else:
-            self.S_t = self.config.ema_alpha * A_t + (1-self.config.ema_alpha) * self.S_t        
+            graph = self.config.ema_alpha * A_t + (1-self.config.ema_alpha) * self.S_t        
+
+        return graph
 
     # approach 1: perform community detection, with smoothed adjecency matrix    
     def fed_hard_cls(self, communities):        
@@ -184,23 +204,30 @@ class FedGraph:
 
         avg_wts_all_models = {}
 
+        stacked_wts = {}
+
+        for name in wts_dict[0].keys():
+            stacked_wts[name] = torch.stack([wt[name] for wt in wts_dict], dim=0)
+
         for client_id, community in communities.items():
+            
+            community_mask = torch.zeros(self.n_clients, device=self.device)
+            community_mask[community] = 1.0
+
+            community_weights = self.S_t[client_id] * community_mask 
+            
+            c_sum = community_weights.sum()
+            if c_sum > 0:
+                community_weights = community_weights / c_sum
+            else:
+                community_weights = torch.zeros_like(community_weights)
+                community_weights[client_id] = 1.0
+            
             client_agg_weights = {}
-            
-            # Get the row of weights for this client: Shape [N_clients]
-            neighbor_weights = torch.zeros(self.n_clients)
-            neighbor_weights.scatter_(0, community, self.S_t[client_id]) 
-            
-            for name in wts_dict[0].keys():
-                # stack params: shape [n_clients, *param_shape] [10, 64, 3, 3]
-                stacked_params = torch.stack([wt[name] for wt in wts_dict], dim=0)
-                
-                view_shape = [-1] + [1] * (stacked_params.dim() - 1)
-                reshaped_weights = neighbor_weights.view(view_shape)              
-               
-                weighted_sum = torch.sum(stacked_params * reshaped_weights, dim=0)
-                
-                client_agg_weights[name] = weighted_sum
+            for name, params_stack in stacked_wts.items():
+                view_shape = [-1] + [1] * (params_stack.dim() - 1)
+                reshaped_weights = community_weights.view(view_shape)
+                client_agg_weights[name] = torch.sum(params_stack * reshaped_weights, dim=0)
             
             avg_wts_all_models[client_id] = client_agg_weights
         
@@ -255,34 +282,33 @@ class FedGraph:
         return avg_wts_all_comm
     
     # Approach 0: general fed avg on a client graph based on edge weights
-    def fed_avg(self):                
+    def fed_avg(self):                    
         wts_dict = [{name:param.data for name, param in model.named_parameters()} for model in self.models]
-
-        # graph is NxN and wts_dict is NxD
         avg_wts_all_models = {}
+
+        # Stack weights: shape [n_clients, ...]
+        stacked_wts = {}
+        for name in wts_dict[0].keys():
+            stacked_wts[name] = torch.stack([wt[name] for wt in wts_dict], dim=0)
         
         for client_id in range(self.n_clients):
             client_agg_weights = {}
             
-            # Get the row of weights for this client: Shape [N_clients]
+            # Get weights: shape [n_clients]
             neighbor_weights = self.S_t[client_id] 
             
-            for name in wts_dict[0].keys():
-                # stack params: shape [n_clients, *param_shape] [10, 64, 3, 3]
-                stacked_params = torch.stack([wt[name] for wt in wts_dict], dim=0)
-                
-                view_shape = [-1] + [1] * (stacked_params.dim() - 1)
+            for name, params_stack in stacked_wts.items():
+                # Efficient weighted sum
+                view_shape = [-1] + [1] * (params_stack.dim() - 1)
                 reshaped_weights = neighbor_weights.view(view_shape)              
-               
-                weighted_sum = torch.sum(stacked_params * reshaped_weights, dim=0)
                 
+                weighted_sum = torch.sum(params_stack * reshaped_weights, dim=0)
                 client_agg_weights[name] = weighted_sum
             
             avg_wts_all_models[client_id] = client_agg_weights
 
-        # return the aggregated weights
-        return avg_wts_all_models        
-
+        return avg_wts_all_models
+        
     @torch.inference_mode()
     def evaluate(self, client, model, dataloader):
         model.eval()
@@ -310,7 +336,7 @@ class FedGraph:
     def train(self, client, prev_model_state, model, lr, dataloader):
         model.train()
         optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
-        # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=self.config.step_size, gamma=self.config.lr_schd_gamma)
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=self.config.step_size, gamma=self.config.lr_schd_gamma)
         
         epoch_loss = []
         
@@ -330,7 +356,7 @@ class FedGraph:
                 
                 batch_loss.append(loss.item())
             
-            # scheduler.step()
+            scheduler.step()
             
             avg_loss = sum(batch_loss) / len(batch_loss) if batch_loss else 0
             epoch_loss.append(avg_loss)
@@ -351,6 +377,7 @@ class FedGraph:
             
             result = {}
             result['selected_clients'] = {}
+            result['train_loss'] = {}
             all_trained_clients = []
                 
             
@@ -365,17 +392,27 @@ class FedGraph:
                 train_res = self.train(
                     client, copy.deepcopy(self.models[client]), self.models[client], lr, self.client_loaders_train[client]
                 )
+                
+                result['train_loss'][client] = train_res['train_loss']
+
+                print(f"Client {client} - Train Loss: {train_res['train_loss']:.4f}")
                             
             result['selected_clients'] = all_trained_clients                                                                
            
-            if self.config.algorithm == 'fed_g_prox':
+            if round_num < self.config.start_graph :
+
+                self.S_t = torch.ones(self.n_clients, self.n_clients, device=self.device) / self.n_clients                
+                aggregated_wts_all_models = self.fed_avg()
+
+            elif self.config.algorithm == 'fed_g_prox':
                 # before federation, refine the graph
-                self.build_graph()
+                graph = self.build_graph(round_num)
+                self.S_t = graph
                 aggregated_wts_all_models = self.fed_avg()
             
-            elif self.config.algorithm == 'fed_g_hard_cls':
-                
-                self.smooth_graph(round_num)
+            elif self.config.algorithm == 'fed_g_hard_cls':                
+                graph = self.build_graph(round_num)
+                self.S_t = graph
                 communities = self.leiden()
                 aggregated_wts_all_models = self.fed_hard_cls(communities)
 
@@ -421,7 +458,7 @@ class FedGraph:
             # once every few rounds, swap the distributions of any 2 random clients, to simulate data drift
             if round_num > 0 and round_num % self.config.swap_dist_every == 0:
                 # swap distribution of few clients
-                for _ in range(int((self.n_clients // 2)*0.4)+1):
+                for _ in range((self.n_clients // 4)+1):
                     r_client_1, r_client_2 = np.random.choice(a=self.config.n_clients, size=2, replace=False)
                     
                     self.client_partitions_train[r_client_1], self.client_partitions_train[r_client_2] = self.client_partitions_train[r_client_2], self.client_partitions_train[r_client_1]
@@ -448,7 +485,7 @@ class FedGraph:
     def plot_graph(self, round_num):    
         plt.figure(figsize=(8, 6))
         rows, cols = np.where(self.S_t.detach().cpu().numpy() > 0)
-        edges = zip(rows.tolist(), cols.tolist())
+        edges = [(rows[i], cols[i], {'weight': self.S_t.detach().cpu().numpy()[rows[i], cols[i]]})  for i in range(len(rows))]
         gr = nx.Graph()
         gr.add_edges_from(edges)
         nx.write_graphml(gr, f"{self.config.log_dir}/graphml_{self.config.dataset}_{self.config.n_clients}_clients_{str(int(self.config.m * 100))}_participation_round_{round_num}.graphml")      
