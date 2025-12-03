@@ -1,61 +1,55 @@
 import flwr as fl
-from flwr.common import (
-    Parameters,
-    FitRes,
-    ndarrays_to_parameters,
-    parameters_to_ndarrays,
-    Code,
-)
+from flwr.common import ndarrays_to_parameters, Context
+    
 from flwr_datasets import FederatedDataset
 from flwr_datasets.partitioner import NaturalIdPartitioner, PathologicalPartitioner, IidPartitioner
 
 import torch
 from dataclasses import dataclass
-from torchvision import datasets, transforms
+from torchvision import transforms
 import numpy as np
-from torch.utils.data import ConcatDataset, DataLoader
 import os
 
-from models import MNISTModel, CIFAR10Model # Assuming your models.py is available
 from client import FlowerClient
 from strategy import FedGraphStrategy
+from models import MNISTModel, CIFAR10Model
 from data_utils import SimpleDataset, FlwrMNISTDataset
 
 @dataclass
 class FedGraphConfig:
     n_clients: int = 10
     m: float = 1.0    # fraction of clients of each cluster that needs to be involved in training
-    
+
     method: str = 'dirichlet'
     dirichlet_alpha: float = 0.3
-    dataset: str = "cifar10"    
+    dataset: str = "cifar10"
     n_classes : int = 10
     model : str = 'mnist'
-    
+
     algorithm : str = 'fed_g_prox'
     prox_lambda : float = 0.25
     k_neighbours : float = 0.4
-    ema_alpha : float = 0.75 
+    ema_alpha : float = 0.75
 
     n_communities : int = 3
 
     client_bs: int = 32
     global_bs: int = 32
-    
+
     global_rounds: int = 10
-    client_epochs: int = 5
+    client_epochs: int = 3
     client_lr: float = 1e-4
     step_size : int = 2
     lr_schd_gamma = 0.5
 
     train_test_split : float = 0.8
     total_train_samples : int = 100000
-    total_test_samples : int = 20000  
+    total_test_samples : int = 20000
 
     # seed
     torch_seed: int = 42
     np_seed: int = 43
-    
+
     local_eval_every : int  = 3
     start_graph : int = 10
     swap_dist_every : int = 8
@@ -64,7 +58,7 @@ class FedGraphConfig:
     verbose: bool = True
 
 config = FedGraphConfig(
-    n_clients=15,
+    n_clients=3,
     n_classes=10,
     client_lr=1e-3,
     dataset='cifar10',
@@ -76,7 +70,7 @@ config = FedGraphConfig(
     dirichlet_alpha=0.5,
     model='cnn',
     m=1,
-    global_rounds=50,
+    global_rounds=10,
     client_epochs=3,
     client_bs=64,
     global_bs=128,
@@ -100,10 +94,8 @@ np.random.seed(config.np_seed)
 
 os.makedirs(f"/content/{config.log_dir}", exist_ok=True)
 
-# load full training data using flwr and split it int train and test
-
 fds = FederatedDataset(
-    dataset="cifar10",
+    dataset=config.dataset,
     partitioners={
         "train": PathologicalPartitioner(
             partition_by="label",
@@ -116,7 +108,7 @@ fds = FederatedDataset(
 
 cifar_transform = transforms.Compose([
     transforms.ToTensor(),
-    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)) if config.dataset == 'cifar10' else transforms.Normalize((0.1307, ), (0.3081, ))
 ])
 
 client_train_partitions = {}
@@ -125,7 +117,7 @@ client_test_partitions = {}
 print("Splitting data for clients...")
 for client_id in range(config.n_clients):
     partition = fds.load_partition(partition_id=client_id, split="train")
-    
+
     split_dataset = partition.train_test_split(train_size=config.train_test_split, seed=config.np_seed)
 
     client_train_partitions[client_id] = FlwrMNISTDataset(
@@ -135,29 +127,14 @@ for client_id in range(config.n_clients):
         split_dataset['test'], client_id, transform=cifar_transform
     )
 
-global_train_loaders = { 
-    i: DataLoader(ds, batch_size=config.client_bs, shuffle=True) 
-    for i, ds in client_train_partitions.items() 
-}
-global_test_loaders = { 
-    i: DataLoader(ds, batch_size=config.client_bs, shuffle=False)  
-    for i, ds in client_test_partitions.items() 
-}
-    
-def client_fn(cid: str):
-    # Load model and data specific to this client ID
-    # Note: You need to adapt your 'client_partitions' logic to be accessible here
-    # Since client_fn only takes 'cid', you usually load data globally or inside here.
-    
-    # Example assuming you have global access to your data partitions
-    # In production, pass a data_loader_factory
-    
-    train_loader = global_train_loaders[int(cid)]
-    test_loader = global_test_loaders[int(cid)]
-    
+def client_fn(context : Context):
+
+    train_dataset = client_train_partitions[int(context.node_id)]
+    test_dataset = client_test_partitions[int(context.nde_id)]
+
     model = CIFAR10Model(n_classes=10)
-    
-    return FlowerClient(cid, model, train_loader, test_loader, config)
+
+    return FlowerClient(int(context.node_id), model, train_dataset, test_dataset, config).to_client()
 
 if __name__ == "__main__":
 
@@ -181,5 +158,5 @@ if __name__ == "__main__":
         num_clients=config.n_clients,
         config=fl.server.ServerConfig(num_rounds=config.global_rounds),
         strategy=strategy,
-        client_resources={"num_cpus": 1, "num_gpus": 0.5 if torch.cuda.is_available() else 0}
+        client_resources={"num_cpus": 1, "num_gpus": 1 if torch.cuda.is_available() else 0}
     )

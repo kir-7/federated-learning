@@ -1,12 +1,14 @@
 import flwr as fl
 import torch
+from torch.utils.data import DataLoader
 
 class FlowerClient(fl.client.NumPyClient):
-    def __init__(self, cid, net, train_loader, val_loader, config):
+    def __init__(self, cid, net, train_dataset, val_dataset, config):
         self.cid = cid
         self.net = net
-        self.train_loader = train_loader
-        self.val_loader = val_loader
+        self.train_dataset, self.val_dataset = train_dataset, val_dataset
+        self.train_loader = DataLoader(train_dataset, batch_size=config.client_bs, shuffle=True)
+        self.val_loader = DataLoader(val_dataset, batch_size=config.client_bs, shuffle=False)
         self.config = config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.net.to(self.device)
@@ -20,32 +22,29 @@ class FlowerClient(fl.client.NumPyClient):
         self.net.load_state_dict(state_dict, strict=True)
 
     def fit(self, parameters, config):
-        # 1. Update local model with global (or graph-averaged) parameters
+      
         self.set_parameters(parameters)
-        
-        # 2. Save these parameters as the "Global/Anchor" state for FedProx
+
         global_params = [torch.tensor(p).to(self.device) for p in parameters]
-        
-        # 3. Training Loop
+
         self.net.train()
         optimizer = torch.optim.Adam(self.net.parameters(), lr=self.config.client_lr)
         criterion = torch.nn.CrossEntropyLoss()
-        
+
         epoch_loss = []
         for _ in range(self.config.client_epochs):
             batch_loss = []
-            for images, labels in self.train_loader:
+            for sample in self.train_loader:
+                images, labels = sample['img'], sample['label']
                 images, labels = images.to(self.device), labels.to(self.device)
                 optimizer.zero_grad()
                 output = self.net(images)
-                
-                # --- FedProx Loss ---
+
                 proximal_term = 0.0
                 for local_weights, global_weights in zip(self.net.parameters(), global_params):
                     proximal_term += (local_weights - global_weights).norm(2)**2
-                
+
                 loss = criterion(output, labels) + (self.config.prox_lambda / 2) * proximal_term
-                # --------------------
 
                 loss.backward()
                 optimizer.step()
@@ -54,19 +53,28 @@ class FlowerClient(fl.client.NumPyClient):
 
         # Return updated weights and metrics
         final_loss = sum(epoch_loss) / len(epoch_loss)
-        return self.get_parameters(config={}), len(self.train_loader.dataset), {"train_loss": final_loss}
+        return self.get_parameters(config={}), len(self.train_dataset), {"train_loss": final_loss, "data_samples":len(self.train_dataset)}
 
     def evaluate(self, parameters, config):
+        # should return loss, num_examples used for evaluation and metrics
         self.set_parameters(parameters)
         self.net.eval()
         correct, total = 0, 0
+        criterion = torch.nn.CrossEntropyLoss()
+        losses = []
         with torch.no_grad():
-            for images, labels in self.val_loader:
+            for sample in self.train_loader:
+                images, labels = sample['img'], sample['label']
                 images, labels = images.to(self.device), labels.to(self.device)
                 outputs = self.net(images)
+
+                loss = criterion(outputs, labels)
+                losses.append(loss.item())
+
                 _, predicted = torch.max(outputs, 1)
                 total += labels.size(0)
                 correct += (predicted == labels).sum().item()
-        
+
         accuracy = correct / total
-        return 0.0, len(self.val_loader.dataset), {"val_acc": accuracy}
+        final_loss = sum(losses) / len(losses)
+        return final_loss, len(self.val_dataset), {"val_acc": accuracy, "data_samples":len(self.val_dataset)}
