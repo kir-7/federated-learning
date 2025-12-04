@@ -21,14 +21,19 @@ class FlowerClient(fl.client.NumPyClient):
         state_dict = {k: torch.tensor(v).to(self.device) for k, v in params_dict}
         self.net.load_state_dict(state_dict, strict=True)
 
+    def get_lr(self, round_num):
+        # reduce lr by 0.9 every config.reduce_lr_every rounds
+        return self.config.client_lr * (0.9**(round_num//self.config.reduce_lr_every))
+
     def fit(self, parameters, config):
-      
+        # should return parameters, num_examples, metrics 
         self.set_parameters(parameters)
 
         global_params = [torch.tensor(p).to(self.device) for p in parameters]
-
         self.net.train()
-        optimizer = torch.optim.Adam(self.net.parameters(), lr=self.config.client_lr)
+
+        lr = self.get_lr(config['server_round'])
+        optimizer = torch.optim.Adam(self.net.parameters(), lr=lr)
         criterion = torch.nn.CrossEntropyLoss()
 
         epoch_loss = []
@@ -40,11 +45,13 @@ class FlowerClient(fl.client.NumPyClient):
                 optimizer.zero_grad()
                 output = self.net(images)
 
-                proximal_term = 0.0
-                for local_weights, global_weights in zip(self.net.parameters(), global_params):
-                    proximal_term += (local_weights - global_weights).norm(2)**2
+                # No proximal loss for now
+                # proximal_term = 0.0
+                # for local_weights, global_weights in zip(self.net.parameters(), global_params):
+                #     proximal_term += (local_weights - global_weights).norm(2)**2
+                # loss = criterion(output, labels) + (self.config.prox_lambda / 2) * proximal_term
 
-                loss = criterion(output, labels) + (self.config.prox_lambda / 2) * proximal_term
+                loss = criterion(output, labels)
 
                 loss.backward()
                 optimizer.step()

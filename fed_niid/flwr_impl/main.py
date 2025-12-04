@@ -1,26 +1,25 @@
 import flwr as fl
 from flwr.common import ndarrays_to_parameters, Context
-    
+
 from flwr_datasets import FederatedDataset
 from flwr_datasets.partitioner import NaturalIdPartitioner, PathologicalPartitioner, IidPartitioner
 
 import torch
 from dataclasses import dataclass
-from torchvision import transforms
+from torchvision import datasets, transforms
 import numpy as np
-import os
 
+from ema_strategy import FlowerStrategy
 from client import FlowerClient
-from strategy import FedGraphStrategy
-from models import MNISTModel, CIFAR10Model
+from models import MNISTModel, CIFAR10Model 
 from data_utils import SimpleDataset, FlwrMNISTDataset
 
 @dataclass
-class FedGraphConfig:
+class FedConfig:
     n_clients: int = 10
     m: float = 1.0    # fraction of clients of each cluster that needs to be involved in training
 
-    method: str = 'dirichlet'
+    sampling_method: str = 'dirichlet'
     dirichlet_alpha: float = 0.3
     dataset: str = "cifar10"
     n_classes : int = 10
@@ -39,12 +38,9 @@ class FedGraphConfig:
     global_rounds: int = 10
     client_epochs: int = 3
     client_lr: float = 1e-4
-    step_size : int = 2
-    lr_schd_gamma = 0.5
+    reduce_lr_every : int = 5
 
     train_test_split : float = 0.8
-    total_train_samples : int = 100000
-    total_test_samples : int = 20000
 
     # seed
     torch_seed: int = 42
@@ -57,12 +53,12 @@ class FedGraphConfig:
     log_dir : str = "checkpoints"
     verbose: bool = True
 
-config = FedGraphConfig(
+config = FedConfig(
     n_clients=3,
     n_classes=10,
     client_lr=1e-3,
     dataset='cifar10',
-    method='pathological',
+    sampling_method='pathological',
 
     k_neighbours = 1.0,
     prox_lambda = 0.001,
@@ -75,24 +71,14 @@ config = FedGraphConfig(
     client_bs=64,
     global_bs=128,
 
-    # total_train_samples= 300000,
-    # total_test_samples = 60000,
-
     local_eval_every = 1,
     swap_dist_every = 51,
     start_graph = 10,
     log_dir='checkpoints_3'
 )
 
-
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-NUM_CPUS_PER_CLIENT = 1
-NUM_GPUS_PER_CLIENT = 0.5 if torch.cuda.is_available() else 0
-
 torch.manual_seed(config.torch_seed)
 np.random.seed(config.np_seed)
-
-os.makedirs(f"/content/{config.log_dir}", exist_ok=True)
 
 fds = FederatedDataset(
     dataset=config.dataset,
@@ -108,7 +94,7 @@ fds = FederatedDataset(
 
 cifar_transform = transforms.Compose([
     transforms.ToTensor(),
-    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)) if config.dataset == 'cifar10' else transforms.Normalize((0.1307, ), (0.3081, ))
+    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)) if config.dataset == 'cifar10'  else transforms.Normalize((0.1307, ), (0.3081, ))
 ])
 
 client_train_partitions = {}
@@ -129,12 +115,14 @@ for client_id in range(config.n_clients):
 
 def client_fn(context : Context):
 
-    train_dataset = client_train_partitions[int(context.node_id)]
-    test_dataset = client_test_partitions[int(context.nde_id)]
+    cid = str(context.node_config.get("partition-id", context.node_id))
+
+    train_dataset = client_train_partitions[int(cid)]
+    test_dataset = client_test_partitions[int(cid)]
 
     model = CIFAR10Model(n_classes=10)
 
-    return FlowerClient(int(context.node_id), model, train_dataset, test_dataset, config).to_client()
+    return FlowerClient(cid, model, train_dataset, test_dataset, config).to_client()
 
 if __name__ == "__main__":
 
@@ -145,7 +133,7 @@ if __name__ == "__main__":
     )
 
     # 3. Define Strategy
-    strategy = FedGraphStrategy(
+    strategy = FlowerStrategy(
         num_clients=config.n_clients,
         initial_parameters=initial_params,
         k_neighbours=config.k_neighbours,
