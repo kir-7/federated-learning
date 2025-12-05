@@ -11,10 +11,8 @@ from flwr.common import (
 from flwr.server.strategy.aggregate import aggregate
 
 from typing import List, Tuple, Union, Optional, Dict
-from functools import reduce
 from torch.utils.data import DataLoader
 from IPython.display import clear_output
-import math
 
 class FlowerStrategy(fl.server.strategy.Strategy):
     def __init__(
@@ -24,15 +22,15 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         global_rounds: int = 10,
         sigma_threshold: float = 1.0,
         fraction_fit: float = 1.0, # Usually 1.0 for this graph approach (active clients)
+        fraction_evaluate: float = 1.0,
         global_dataset=None,
         global_bs=None,
-        ema_alpha=0.8,
-        anneal_alpha=False
+        momentum=0.7,
     ):
         self.num_clients = num_clients
         self.sigma_threshold = sigma_threshold
         self.fraction_fit = fraction_fit
-        self.fraction_evaluate = fraction_fit
+        self.fraction_evaluate = fraction_evaluate
         self.global_rounds = global_rounds
 
         if global_dataset and global_bs:
@@ -41,11 +39,10 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         else:
             self.global_dataset, self.global_loader = None, None
 
-        self.ema_alpha = ema_alpha
-        self.anneal_alpha = anneal_alpha
-        self.decay_rate = -((math.log(0.7/self.ema_alpha)) / max(1, self.global_rounds))
-        
+        self.momentum = momentum
+ 
         self.weights = parameters_to_ndarrays(initial_parameters)
+        self.momentum_vector : Optional[NDArrays] = None
 
     def initialize_parameters(self, client_manager):
         initial_parameters = ndarrays_to_parameters(self.weights)        
@@ -59,8 +56,9 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         clients = client_manager.sample(sample_size, min_num_clients=1)
 
         fit_configurations = []
-
+        
         for client in clients :
+            print("cid: ", client.cid)
             fitins = fl.common.FitIns(parameters, {"server_round":server_round})
             fit_configurations.append((client, fitins))
 
@@ -89,22 +87,31 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         loss_aggregated = []
         to_aggregate = []
 
+
         for _, fit_res in results:
             to_aggregate.append((parameters_to_ndarrays(fit_res.parameters), fit_res.num_examples))
             loss_aggregated.append(fit_res.metrics['train_loss'])
 
-        # a simple ema based aggregation instead of fed prox
         aggregated_ndarrays = aggregate(to_aggregate)
-        
-        alpha = self.ema_alpha if not self.anneal_alpha else self.get_ema_alpha(server_round)
-        
-        if self.anneal_alpha:
-            print(f"Round {server_round}: Annealing EMA Alpha to {alpha:.4f}") 
 
-        smoothed_ndarrays = self.smooth_ndarrays(alpha, aggregated_ndarrays)
+        grad_ndarrays = [
+            prev - curr for prev, curr in zip(self.weights, aggregated_ndarrays)
+        ]
 
-        self.weights = smoothed_ndarrays
-        parameters_aggregated = ndarrays_to_parameters(smoothed_ndarrays)
+        if self.momentum_vector is None:
+            self.momentum_vector = grad_ndarrays
+        else:
+            self.momentum_vector = [
+                self.momentum * v + g
+                for v, g in zip(self.momentum_vector, grad_ndarrays)
+            ]
+
+        new_weights_ndarray = [
+            w-v for w, v in zip(self.weights, self.momentum_vector)
+        ]    
+        
+        self.weights = new_weights_ndarray
+        parameters_aggregated = ndarrays_to_parameters(new_weights_ndarray)
 
         metrics = {"avg_train_loss": sum(loss_aggregated) / len(loss_aggregated)}
 
@@ -118,7 +125,6 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         sample_size = int(self.num_clients * self.fraction_evaluate)
         clients = client_manager.sample(sample_size, min_num_clients=1)
 
-        eval_configurations = []
         evaluate_ins = EvaluateIns(parameters, {"round":server_round})
 
         return [(client, evaluate_ins) for client in clients]
@@ -169,17 +175,3 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         """       
         return None      
     
-    
-    def get_ema_alpha(self, round_num):
-        return self.ema_alpha * math.exp(- self.decay_rate * round_num)
-
-    def smooth_ndarrays(self, alpha, aggregated_ndarrays):
-               
-        # Compute smoothed weights for each layer
-        weights_prime: NDArrays = []
-
-        for aggregate_layer, prev_layer in zip(aggregated_ndarrays, self.weights):
-            layer_prime = (alpha * aggregate_layer) + ((1-alpha) * prev_layer)
-            weights_prime.append(layer_prime)
-
-        return weights_prime 

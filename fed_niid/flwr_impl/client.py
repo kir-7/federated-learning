@@ -84,4 +84,4 @@ class FlowerClient(fl.client.NumPyClient):
 
         accuracy = correct / total
         final_loss = sum(losses) / len(losses)
-        return final_loss, len(self.val_dataset), {"val_acc": accuracy, "data_samples":len(self.val_dataset)}
+        return final_loss, len(self.val_dataset), {"val_acc": accuracy, "data_samples":len(self.val_dataset), "val_loss":final_loss}

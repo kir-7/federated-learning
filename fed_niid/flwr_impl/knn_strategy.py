@@ -8,12 +8,13 @@ from flwr.common import (
     EvaluateRes,
     NDArrays,
 )
-from flwr.server.strategy.aggregate import aggregate
 
 from typing import List, Tuple, Union, Optional, Dict
 from functools import reduce
 from torch.utils.data import DataLoader
 from IPython.display import clear_output
+import numpy as np
+import copy
 import math
 
 class FlowerStrategy(fl.server.strategy.Strategy):
@@ -21,32 +22,36 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         self,
         num_clients: int,
         initial_parameters: Parameters,
+        k_neighbours:float = 0.4,
         global_rounds: int = 10,
         sigma_threshold: float = 1.0,
         fraction_fit: float = 1.0, # Usually 1.0 for this graph approach (active clients)
         global_dataset=None,
         global_bs=None,
-        ema_alpha=0.8,
-        anneal_alpha=False
     ):
         self.num_clients = num_clients
         self.sigma_threshold = sigma_threshold
         self.fraction_fit = fraction_fit
         self.fraction_evaluate = fraction_fit
         self.global_rounds = global_rounds
+        self.k_neighbours = k_neighbours
 
+        if fraction_fit < 1:
+            raise ValueError(f"Currently not supported for paricipation ratio < 1")
+
+        self.topk = max(1, int(k_neighbours * num_clients))
+       
         if global_dataset and global_bs:
             self.global_dataset = global_dataset
             self.global_loader = DataLoader(global_dataset, batch_size=128, shuffle=True)
         else:
             self.global_dataset, self.global_loader = None, None
-
-        self.ema_alpha = ema_alpha
-        self.anneal_alpha = anneal_alpha
-        self.decay_rate = -((math.log(0.7/self.ema_alpha)) / max(1, self.global_rounds))
         
         self.weights = parameters_to_ndarrays(initial_parameters)
 
+        self.client_cids = []
+        self.client_models = {}
+        
     def initialize_parameters(self, client_manager):
         initial_parameters = ndarrays_to_parameters(self.weights)        
         return initial_parameters
@@ -61,8 +66,16 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         fit_configurations = []
 
         for client in clients :
-            fitins = fl.common.FitIns(parameters, {"server_round":server_round})
-            fit_configurations.append((client, fitins))
+            if client.cid in self.client_models:
+                client_parameters = ndarrays_to_parameters(self.client_models[client.cid])
+                fitins = fl.common.FitIns(client_parameters, {"server_round":server_round})
+                fit_configurations.append((client, fitins))
+            else:
+                client_parameters = ndarrays_to_parameters(self.weights)
+                fitins = fl.common.FitIns(client_parameters, {"server_round":server_round})
+                fit_configurations.append((client, fitins))
+                self.client_cids.append(client.cid)
+                self.client_models[client.cid] = self.weights 
 
         return fit_configurations
 
@@ -87,28 +100,34 @@ class FlowerStrategy(fl.server.strategy.Strategy):
                     print(f"    Failure {i}: {failure}")
 
         loss_aggregated = []
-        to_aggregate = []
+        client_weights = {}
+        to_aggregate = {}
 
-        for _, fit_res in results:
-            to_aggregate.append((parameters_to_ndarrays(fit_res.parameters), fit_res.num_examples))
+        for client, fit_res in results:
+            client_weights[client.cid] = (parameters_to_ndarrays(fit_res.parameters), fit_res.num_examples)
             loss_aggregated.append(fit_res.metrics['train_loss'])
 
-        # a simple ema based aggregation instead of fed prox
-        aggregated_ndarrays = aggregate(to_aggregate)
+        distances = self.calculate_pairwise_distances(client_weights)
+        similarities = {}
+
+        sigma = np.quantile([v for _, v in distances.items() if v > 0], 0.5)
+
+        # get topk neighbours, distance should be least and similarity should be high
+        for i, (key, dist) in enumerate(sorted(distances.items(), key=lambda x: x[1], reverse=True)):
+            if i > self.topk:
+                similarities[key] = 0
+            else:
+                similarities[key] = math.exp(-dist/sigma)
         
-        alpha = self.ema_alpha if not self.anneal_alpha else self.get_ema_alpha(server_round)
+        for node_cid in self.client_models.keys():
+            for nei_cid in self.client_models.keys():
+                to_aggregate[node_cid].append(client_weights[nei_cid] + (similarities[(node_cid, nei_cid)], ))
         
-        if self.anneal_alpha:
-            print(f"Round {server_round}: Annealing EMA Alpha to {alpha:.4f}") 
+        self.client_models = {client_cid:self.distance_aggregate(client_neighbours) for client_cid, client_neighbours in to_aggregate.items()}
 
-        smoothed_ndarrays = self.smooth_ndarrays(alpha, aggregated_ndarrays)
+        metrics = {"avg_train_loss": sum(loss_aggregated) / len(loss_aggregated), "similarity_scores": similarities}
 
-        self.weights = smoothed_ndarrays
-        parameters_aggregated = ndarrays_to_parameters(smoothed_ndarrays)
-
-        metrics = {"avg_train_loss": sum(loss_aggregated) / len(loss_aggregated)}
-
-        return parameters_aggregated, metrics
+        return ndarrays_to_parameters(self.client_models[self.client_cids[0]]), metrics
 
     def configure_evaluate(
         self, server_round: int, parameters: Parameters, client_manager: fl.server.client_manager.ClientManager
@@ -118,10 +137,21 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         sample_size = int(self.num_clients * self.fraction_evaluate)
         clients = client_manager.sample(sample_size, min_num_clients=1)
 
-        eval_configurations = []
-        evaluate_ins = EvaluateIns(parameters, {"round":server_round})
+        evaluate_configurations = []
 
-        return [(client, evaluate_ins) for client in clients]
+        for client in clients :
+            if client.cid in self.client_models:
+                client_parameters = ndarrays_to_parameters(self.client_models[client.cid])
+                evaluate_ins = EvaluateIns(client_parameters, {"server_round":server_round})
+                evaluate_configurations.append((client, evaluate_ins))
+            else:
+                client_parameters = ndarrays_to_parameters(self.weights)
+                evaluate_ins = EvaluateIns(client_parameters, {"server_round":server_round})
+                evaluate_configurations.append((client, evaluate_ins))
+                self.client_cids.append(client.cid)
+                self.client_models[client.cid] = self.weights
+
+        return evaluate_configurations
 
     def aggregate_evaluate(
         self,
@@ -155,7 +185,7 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         else:
             weighted_acc = sum(accuracies) / sum(examples)
             weighted_loss = sum(losses) / sum(examples)
-            
+
         clear_output(wait=True)
         print(f"Round {server_round} - Average Accuracy of Personalized Models: {weighted_acc * 100:.2f}%")
 
@@ -169,17 +199,34 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         """       
         return None      
     
+    def flatten(self, weights_ndarrays : NDArrays):
+        return np.hstack([layer.flatten() for layer in weights_ndarrays])
     
-    def get_ema_alpha(self, round_num):
-        return self.ema_alpha * math.exp(- self.decay_rate * round_num)
+    def calculate_pairwise_distances(self, client_weights : Dict[int, Tuple[NDArrays, int]]) -> Dict[Tuple[int, int], float]:
 
-    def smooth_ndarrays(self, alpha, aggregated_ndarrays):
-               
-        # Compute smoothed weights for each layer
-        weights_prime: NDArrays = []
+        distances = {}
 
-        for aggregate_layer, prev_layer in zip(aggregated_ndarrays, self.weights):
-            layer_prime = (alpha * aggregate_layer) + ((1-alpha) * prev_layer)
-            weights_prime.append(layer_prime)
+        for client_a in self.client_cids:
+            for client_b in self.client_cids:
+                vec_a, vec_b = self.flatten(client_weights[client_a][0]), self.flatten(client_weights[client_b][0])
+                distance = np.linalg.norm(vec_a-vec_b, ord=2)
+                distances[(client_a, client_b)] = distance
 
-        return weights_prime 
+        return distances
+    
+    def distance_aggregate(self, client_neighbours : list[tuple[NDArrays, int, float]]) -> NDArrays:
+        
+        num_examples_total = sum(num_examples for (_, num_examples, _) in client_neighbours)
+        distance_total = sum(distance for (_, _, distance) in client_neighbours)
+
+
+        weighted_weights = [
+            [layer * num_examples * distance for layer in weights] for weights, num_examples, distance in client_neighbours
+        ]
+
+        # Compute average weights of each layer
+        weights_prime: NDArrays = [
+            reduce(np.add, layer_updates) / (num_examples_total*distance_total)
+            for layer_updates in zip(*weighted_weights, strict=True)
+        ]
+        return weights_prime

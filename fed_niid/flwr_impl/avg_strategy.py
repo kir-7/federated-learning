@@ -22,13 +22,14 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         initial_parameters: Parameters,
         sigma_threshold: float = 1.0,
         fraction_fit: float = 1.0,
+        fraction_evaluate: float=1.0,
         global_dataset=None,
         global_bs=None
     ):
         self.num_clients = num_clients
         self.sigma_threshold = sigma_threshold
         self.fraction_fit = fraction_fit
-        self.fraction_evaluate = fraction_fit
+        self.fraction_evaluate = fraction_evaluate
         
         if global_dataset and global_bs:
             self.global_dataset = global_dataset
@@ -48,9 +49,6 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         self, server_round: int, parameters: Parameters, client_manager: fl.server.client_manager.ClientManager
     ) -> List[Tuple[fl.server.client_proxy.ClientProxy, fl.common.FitIns]]:
 
-        # 1. Select clients
-        # In Graph FL, we typically want to sample a subset, but we need the graph of ALL clients.
-        # Flower handles sampling here.
         sample_size = int(self.num_clients * self.fraction_fit)
         clients = client_manager.sample(sample_size, min_num_clients=1)
 
@@ -132,16 +130,20 @@ class FlowerStrategy(fl.server.strategy.Strategy):
 
         accuracies = [r.metrics["val_acc"] * r.num_examples for _, r in results]
         examples = [r.num_examples for _, r in results]
+        losses = [r.metrics['val_loss'] * r.num_examples for _, r in results]
+
 
         if sum(examples) == 0:
             weighted_acc = 0
+            weighted_loss = 0
         else:
             weighted_acc = sum(accuracies) / sum(examples)
-
+            weighted_loss = sum(losses) / sum(examples)
+            
         clear_output(wait=True)
         print(f"Round {server_round} - Average Accuracy of Personalized Models: {weighted_acc * 100:.2f}%")
 
-        return float(weighted_acc), {"accuracy": float(weighted_acc)}
+        return float(weighted_loss), {"accuracy": float(weighted_acc)}
 
     def evaluate(self, server_round: int, parameters: Parameters) -> Optional[Tuple[float, Dict[str, float]]]:
         """
