@@ -70,7 +70,7 @@ class FlowerClient(fl.client.NumPyClient):
         criterion = torch.nn.CrossEntropyLoss()
         losses = []
         with torch.no_grad():
-            for sample in self.train_loader:
+            for sample in self.val_loader:
                 images, labels = sample['img'], sample['label']
                 images, labels = images.to(self.device), labels.to(self.device)
                 outputs = self.net(images)

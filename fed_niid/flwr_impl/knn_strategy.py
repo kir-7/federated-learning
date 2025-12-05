@@ -14,27 +14,27 @@ from functools import reduce
 from torch.utils.data import DataLoader
 from IPython.display import clear_output
 import numpy as np
-import copy
 import math
-
+from collections import defaultdict
 class FlowerStrategy(fl.server.strategy.Strategy):
     def __init__(
         self,
         num_clients: int,
         initial_parameters: Parameters,
         k_neighbours:float = 0.4,
-        global_rounds: int = 10,
         sigma_threshold: float = 1.0,
         fraction_fit: float = 1.0, # Usually 1.0 for this graph approach (active clients)
+        fraction_evaluate:float =1.0,
         global_dataset=None,
         global_bs=None,
+        start_knn:int=5,
     ):
         self.num_clients = num_clients
         self.sigma_threshold = sigma_threshold
         self.fraction_fit = fraction_fit
-        self.fraction_evaluate = fraction_fit
-        self.global_rounds = global_rounds
+        self.fraction_evaluate = fraction_evaluate
         self.k_neighbours = k_neighbours
+        self.start_knn = start_knn
 
         if fraction_fit < 1:
             raise ValueError(f"Currently not supported for paricipation ratio < 1")
@@ -49,7 +49,7 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         
         self.weights = parameters_to_ndarrays(initial_parameters)
 
-        self.client_cids = []
+        self.client_cids = set()
         self.client_models = {}
         
     def initialize_parameters(self, client_manager):
@@ -67,15 +67,14 @@ class FlowerStrategy(fl.server.strategy.Strategy):
 
         for client in clients :
             if client.cid in self.client_models:
-                client_parameters = ndarrays_to_parameters(self.client_models[client.cid])
-                fitins = fl.common.FitIns(client_parameters, {"server_round":server_round})
-                fit_configurations.append((client, fitins))
+                client_parameters = ndarrays_to_parameters(self.client_models[client.cid])                
             else:
                 client_parameters = ndarrays_to_parameters(self.weights)
-                fitins = fl.common.FitIns(client_parameters, {"server_round":server_round})
-                fit_configurations.append((client, fitins))
-                self.client_cids.append(client.cid)
+                self.client_cids.add(client.cid)
                 self.client_models[client.cid] = self.weights 
+
+            fitins = fl.common.FitIns(client_parameters, {"server_round":server_round})
+            fit_configurations.append((client, fitins))
 
         return fit_configurations
 
@@ -101,33 +100,33 @@ class FlowerStrategy(fl.server.strategy.Strategy):
 
         loss_aggregated = []
         client_weights = {}
-        to_aggregate = {}
+        to_aggregate = defaultdict(list)
 
         for client, fit_res in results:
-            client_weights[client.cid] = (parameters_to_ndarrays(fit_res.parameters), fit_res.num_examples)
+            w = parameters_to_ndarrays(fit_res.parameters)
+            client_weights[client.cid] = (w, fit_res.num_examples)
             loss_aggregated.append(fit_res.metrics['train_loss'])
+            self.client_models[client.cid] = w
 
-        distances = self.calculate_pairwise_distances(client_weights)
-        similarities = {}
+        active_cids = list(client_weights.keys())
 
-        sigma = np.quantile([v for _, v in distances.items() if v > 0], 0.5)
-
-        # get topk neighbours, distance should be least and similarity should be high
-        for i, (key, dist) in enumerate(sorted(distances.items(), key=lambda x: x[1], reverse=True)):
-            if i > self.topk:
-                similarities[key] = 0
-            else:
-                similarities[key] = math.exp(-dist/sigma)
+        distances = self.calculate_pairwise_distances(client_weights, active_cids)
+        similarities = self.get_topk_similarities(server_round, distances, active_cids)
         
-        for node_cid in self.client_models.keys():
-            for nei_cid in self.client_models.keys():
-                to_aggregate[node_cid].append(client_weights[nei_cid] + (similarities[(node_cid, nei_cid)], ))
-        
-        self.client_models = {client_cid:self.distance_aggregate(client_neighbours) for client_cid, client_neighbours in to_aggregate.items()}
+        for node_cid in active_cids:
+            for nei_cid in active_cids:
+                sim = similarities.get((node_cid, nei_cid), 0.0)
+                w_nei, n_nei = client_weights[nei_cid]
 
+                if sim > 0:
+                    to_aggregate[node_cid].append((w_nei, n_nei, sim))
+        
+        for client_cid, neighbors in to_aggregate.items():
+            self.client_models[client_cid] = self.similarity_aggregate(neighbors)
+        
         metrics = {"avg_train_loss": sum(loss_aggregated) / len(loss_aggregated), "similarity_scores": similarities}
 
-        return ndarrays_to_parameters(self.client_models[self.client_cids[0]]), metrics
+        return ndarrays_to_parameters(self.client_models[active_cids[0]]), metrics
 
     def configure_evaluate(
         self, server_round: int, parameters: Parameters, client_manager: fl.server.client_manager.ClientManager
@@ -141,15 +140,14 @@ class FlowerStrategy(fl.server.strategy.Strategy):
 
         for client in clients :
             if client.cid in self.client_models:
-                client_parameters = ndarrays_to_parameters(self.client_models[client.cid])
-                evaluate_ins = EvaluateIns(client_parameters, {"server_round":server_round})
-                evaluate_configurations.append((client, evaluate_ins))
+                client_parameters = ndarrays_to_parameters(self.client_models[client.cid])                
             else:
                 client_parameters = ndarrays_to_parameters(self.weights)
-                evaluate_ins = EvaluateIns(client_parameters, {"server_round":server_round})
-                evaluate_configurations.append((client, evaluate_ins))
-                self.client_cids.append(client.cid)
+                self.client_cids.add(client.cid)
                 self.client_models[client.cid] = self.weights
+
+            evaluate_ins = EvaluateIns(client_parameters, {"server_round":server_round})
+            evaluate_configurations.append((client, evaluate_ins))
 
         return evaluate_configurations
 
@@ -202,31 +200,60 @@ class FlowerStrategy(fl.server.strategy.Strategy):
     def flatten(self, weights_ndarrays : NDArrays):
         return np.hstack([layer.flatten() for layer in weights_ndarrays])
     
-    def calculate_pairwise_distances(self, client_weights : Dict[int, Tuple[NDArrays, int]]) -> Dict[Tuple[int, int], float]:
+    def get_topk_similarities(self, server_round, distances, activate_cids):
+        
+        valid_dists = [v for v in distances.values() if v > 0]
+        if not valid_dists:
+            sigma = 1.0
+        else:
+            sigma = np.quantile(valid_dists, 0.5)
+            if sigma == 0: sigma = 1.0 
+
+        similarities = {}
+
+        for client_a in activate_cids:
+            candidates = []
+            for client_b in activate_cids:
+                candidates.append((client_b, math.exp(-distances[(client_a, client_b)]/sigma)))
+            
+            candidates.sort(key=lambda x:x[1], reverse=True)
+
+            for i, (nei, similarity) in enumerate(candidates):
+                if  server_round < self.start_knn:
+                    similarities[(client_a, nei)] = similarity
+                elif i <= self.topk:
+                    similarities[(client_a, nei)] = similarity
+                else:
+                    similarities[(client_a, nei)] = 0
+        
+        return similarities
+
+    def calculate_pairwise_distances(self, client_weights : Dict[int, Tuple[NDArrays, int]], active_cids) -> Dict[Tuple[int, int], float]:
 
         distances = {}
+        flat_vecs = {cid: self.flatten(client_weights[cid][0]) for cid in active_cids}
 
-        for client_a in self.client_cids:
-            for client_b in self.client_cids:
-                vec_a, vec_b = self.flatten(client_weights[client_a][0]), self.flatten(client_weights[client_b][0])
-                distance = np.linalg.norm(vec_a-vec_b, ord=2)
-                distances[(client_a, client_b)] = distance
+        for client_a in active_cids:
+            for client_b in active_cids:
+                if client_a == client_b:
+                    distances[(client_a, client_b)] = 0.0
+                else:
+                    dist = np.linalg.norm(flat_vecs[client_a] - flat_vecs[client_b], ord=2)
+                    distances[(client_a, client_b)] = float(dist)
 
         return distances
     
-    def distance_aggregate(self, client_neighbours : list[tuple[NDArrays, int, float]]) -> NDArrays:
-        
-        num_examples_total = sum(num_examples for (_, num_examples, _) in client_neighbours)
-        distance_total = sum(distance for (_, _, distance) in client_neighbours)
+    def similarity_aggregate(self, client_neighbours : list[tuple[NDArrays, int, float]]) -> NDArrays:    
 
+        sum_aggregation_weights = sum(num_examples * similarity for (_, num_examples, similarity) in client_neighbours) 
 
         weighted_weights = [
-            [layer * num_examples * distance for layer in weights] for weights, num_examples, distance in client_neighbours
+            [layer * num_examples * similarity for layer in weights] for weights, num_examples, similarity in client_neighbours
         ]
 
         # Compute average weights of each layer
         weights_prime: NDArrays = [
-            reduce(np.add, layer_updates) / (num_examples_total*distance_total)
+            reduce(np.add, layer_updates) / sum_aggregation_weights
             for layer_updates in zip(*weighted_weights, strict=True)
         ]
         return weights_prime
