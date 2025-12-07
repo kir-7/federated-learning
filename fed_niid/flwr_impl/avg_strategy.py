@@ -10,7 +10,7 @@ from flwr.common import (
 )
 from flwr.server.strategy.aggregate import aggregate
 
-from typing import List, Tuple, Union, Optional, Dict, Any
+from typing import List, Tuple, Union, Optional, Dict
 from torch.utils.data import DataLoader
 
 from IPython.display import clear_output
