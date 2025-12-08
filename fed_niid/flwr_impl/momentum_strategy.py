@@ -125,7 +125,7 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         sample_size = int(self.num_clients * self.fraction_evaluate)
         clients = client_manager.sample(sample_size, min_num_clients=1)
 
-        evaluate_ins = EvaluateIns(parameters, {"round":server_round})
+        evaluate_ins = EvaluateIns(parameters, {"server_round":server_round})
 
         return [(client, evaluate_ins) for client in clients]
 

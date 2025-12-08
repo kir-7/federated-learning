@@ -24,6 +24,7 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         global_rounds: int = 10,
         sigma_threshold: float = 1.0,
         fraction_fit: float = 1.0, # Usually 1.0 for this graph approach (active clients)
+        fraction_evaluate: float = 1.0,
         global_dataset=None,
         global_bs=None,
         ema_alpha=0.8,
@@ -32,7 +33,7 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         self.num_clients = num_clients
         self.sigma_threshold = sigma_threshold
         self.fraction_fit = fraction_fit
-        self.fraction_evaluate = fraction_fit
+        self.fraction_evaluate = fraction_evaluate
         self.global_rounds = global_rounds
 
         if global_dataset and global_bs:
@@ -119,7 +120,7 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         clients = client_manager.sample(sample_size, min_num_clients=1)
 
         eval_configurations = []
-        evaluate_ins = EvaluateIns(parameters, {"round":server_round})
+        evaluate_ins = EvaluateIns(parameters, {"server_round":server_round})
 
         return [(client, evaluate_ins) for client in clients]
 

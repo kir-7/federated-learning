@@ -6,7 +6,6 @@ from flwr.common import (
     parameters_to_ndarrays,
     EvaluateIns,
     EvaluateRes,
-    Code,
 )
 from flwr.server.strategy.aggregate import aggregate
 
@@ -41,7 +40,7 @@ class FlowerStrategy(fl.server.strategy.Strategy):
 
     def initialize_parameters(self, client_manager):
         # We handle initialization in __init__, so we return None here
-        initial_parameters = self.initial_weights
+        initial_parameters = ndarrays_to_parameters(self.initial_weights)
         self.initial_weights = None
         return initial_parameters
 
@@ -103,7 +102,7 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         clients = client_manager.sample(sample_size, min_num_clients=1)
 
         eval_configurations = []
-        evaluate_ins = EvaluateIns(parameters, {"round":server_round})
+        evaluate_ins = EvaluateIns(parameters, {"server_round":server_round})
 
         return [(client, evaluate_ins) for client in clients]
 

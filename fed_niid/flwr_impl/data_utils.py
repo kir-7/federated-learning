@@ -41,7 +41,13 @@ class FlwrMNISTDataset(torch.utils.data.Dataset):
         return len(self.data)
 
     def __getitem__(self, index):
-        x, y = self.data[index].values()
+        raw_item = self.data[index]
+
+        if isinstance(raw_item, (tuple, list)):
+            x, y = raw_item
+        else:
+            x = raw_item['img']
+            y = raw_item['label']
         
         if self.transform:
             x = self.transform(x)

@@ -2,22 +2,17 @@ import flwr as fl
 import torch
 from torch.utils.data import DataLoader, Subset
 
-class FlwrDataDriftClient(fl.client.NumPyClient):
+class FlowerClient(fl.client.NumPyClient):
     def __init__(self, cid, net, train_dataset, val_dataset, config):
         self.cid = cid
         self.net = net
         self.train_dataset, self.val_dataset = train_dataset, val_dataset
-        
-        # sort datasets based on labels
-        train_labels = [sample['label'] for sample in train_dataset]
-        val_labels = [sample['label'] for sample in train_dataset]
 
-        train_sorted = torch.argsort(train_labels)
-        val_sorted = torch.argsort(val_labels)
+        # datasets are based on labels
 
         # sort the dataset to introduce new classes on each data drift
-        self.train_dataset = Subset(train_dataset, train_sorted)
-        self.val_dataset = Subset(val_dataset, val_sorted)
+        self.train_dataset_sorted = train_dataset
+        self.val_dataset_sorted = val_dataset
 
         self.config = config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -27,25 +22,41 @@ class FlwrDataDriftClient(fl.client.NumPyClient):
         self.n_val_samples = len(self.val_dataset)
 
         self.init_data_usage : float = config.init_data_usage
-        self.data_growth_rate : float = (1-config.init_data_usage) / (config.global_rounds // config.client_drift_every)  # increase data size by this much percentage
+        self.total_drift_steps = max(1, config.global_rounds // config.data_drift_every)
+
+        if self.total_drift_steps > 1:
+            self.growth_per_step = (1.0 - self.init_data_usage) / (self.total_drift_steps - 1)
+        else:
+            self.growth_per_step = 0.0 # If only 1 step, we stick to init or jump to 1.0 depending on preference
+
+        self.train_slice_idx = 0
+        self.val_slice_idx = 0
+
+    def _get_current_pct(self, server_round):
+        current_step = (server_round - 1) // self.config.data_drift_every
+
+        current_pct = self.init_data_usage + (current_step * self.growth_per_step)
+
+        return min(current_pct, 1.0)
 
     def get_round_train_data(self, server_round : int):
-        current_pct = self.init_data_usage + (server_round -1) * self.data_growth_rate
+
+        current_pct = self._get_current_pct(server_round)
 
         self.train_slice_idx = max(int(self.n_train_samples * current_pct), 1)
-        
+
         print(f"[Round {server_round}] Client using {self.train_slice_idx}/{self.n_train_samples} train samples ({int(current_pct*100)}%)")
-        
-        return self.train_dataset[:self.train_slice_idx]
-    
+
+        return Subset(self.train_dataset_sorted, list(range(self.train_slice_idx)))
+
     def get_round_val_data(self, server_round : int):
-        current_pct = self.init_data_usage + (server_round -1) * self.data_growth_rate
+        current_pct = self._get_current_pct(server_round)
 
         self.val_slice_idx = max(int(self.n_val_samples * current_pct), 1)
 
         print(f"[Round {server_round}] Client using {self.val_slice_idx}/{self.n_val_samples} val samples ({int(current_pct*100)}%)")
-        
-        return self.val_dataset[:self.val_slice_idx]
+
+        return Subset(self.val_dataset_sorted, list(range(self.val_slice_idx)))
 
     def get_parameters(self, config):
         return [val.cpu().numpy() for _, val in self.net.state_dict().items()]
@@ -60,15 +71,16 @@ class FlwrDataDriftClient(fl.client.NumPyClient):
         return self.config.client_lr * (0.9**(round_num//self.config.reduce_lr_every))
 
     def fit(self, parameters, config):
-        # should return parameters, num_examples, metrics 
+        # should return parameters, num_examples, metrics
         self.set_parameters(parameters)
 
         train_data = self.get_round_train_data(config['server_round'])
-        train_loader = DataLoader(train_data, batch_size=min(self.config.client_bs, self.train_slice_idx), shuffle=True)        
+
+        train_loader = DataLoader(train_data, batch_size=min(self.config.client_bs, self.train_slice_idx), shuffle=True)
 
         global_params = [torch.tensor(p).to(self.device) for p in parameters]
         self.net.train()
-                
+
         lr = self.get_lr(config['server_round'])
         optimizer = torch.optim.Adam(self.net.parameters(), lr=lr)
         criterion = torch.nn.CrossEntropyLoss()
@@ -96,13 +108,13 @@ class FlwrDataDriftClient(fl.client.NumPyClient):
 
         # Return updated weights and metrics
         final_loss = sum(epoch_loss) / len(epoch_loss)
-        return self.get_parameters(config={}), len(self.train_dataset), {"train_loss": final_loss, "data_samples":len(self.train_dataset)}
+        return self.get_parameters(config={}), len(train_data), {"train_loss": final_loss, "data_samples":len(train_data)}
 
     def evaluate(self, parameters, config):
         # should return loss, num_examples used for evaluation and metrics
         self.set_parameters(parameters)
-        
-        val_data = self.get_round_val_data(config["sever_round"])
+
+        val_data = self.get_round_val_data(config["server_round"])
         val_loader = DataLoader(val_data, batch_size=min(self.config.client_bs, self.val_slice_idx))
 
         self.net.eval()
@@ -124,4 +136,4 @@ class FlwrDataDriftClient(fl.client.NumPyClient):
 
         accuracy = correct / total
         final_loss = sum(losses) / len(losses)
-        return final_loss, len(self.val_dataset), {"val_acc": accuracy, "data_samples":len(self.val_dataset), "val_loss":final_loss}
+        return final_loss, len(val_data), {"val_acc": accuracy, "data_samples":len(val_data), "val_loss":final_loss}

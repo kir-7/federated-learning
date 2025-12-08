@@ -152,9 +152,9 @@ def plot_compare_experiments(filepaths, save_path=None):
 if __name__ == "__main__":
     # Define your files here
     files_to_compare = [
-        "results (client evaluation on val loader)\history_cifar10_fedknn_nc_10_m_70.pkl",    
-        "results (client evaluation on val loader)\history_cifar10_fedprox_nc_10_m_70.pkl"    ,
-        
+        "results (client evaluation on val loader)\history_cifar10_fedema_nc_10_m_100_data_drift.pkl",    
+        "results (client evaluation on val loader)\history_cifar10_fedknn_nc_10_m_100_data_drift.pkl"    ,
+        "results (client evaluation on val loader)\history_cifar10_fedprox_nc_10_m_100_data_drift.pkl"
     ]
     
-    plot_compare_experiments(files_to_compare, save_path="./plots/knn_70_participation.png")
+    plot_compare_experiments(files_to_compare, save_path="./plots/data_drift_100_participation.png")
