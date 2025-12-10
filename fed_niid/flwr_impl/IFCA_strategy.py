@@ -16,29 +16,29 @@ from IPython.display import clear_output
 import numpy as np
 import math
 from collections import defaultdict
+import copy
 
 class FlowerStrategy(fl.server.strategy.Strategy):
     def __init__(
         self,
         num_clients: int,
         initial_parameters: Parameters,
-        k_neighbours:float = 0.4,
-        sigma_threshold: float = 1.0,
+        k_clusters:int = 3,
         fraction_fit: float = 1.0, # Usually 1.0 for this graph approach (active clients)
         fraction_evaluate:float =1.0,
         global_dataset=None,
         global_bs=None,
-        start_knn:int=5,
+        model_layer_counts:int=None
     ):
         self.num_clients = num_clients
-        self.sigma_threshold = sigma_threshold
         self.fraction_fit = fraction_fit
         self.fraction_evaluate = fraction_evaluate
-        self.k_neighbours = k_neighbours
-        self.start_knn = start_knn
- 
-        self.topk = max(1, int(k_neighbours * num_clients))
-       
+        self.k_clusters = k_clusters
+
+        assert model_layer_counts is not None, "Model Layer counts need to be passes"
+
+        self.model_layer_counts = model_layer_counts
+                
         if global_dataset and global_bs:
             self.global_dataset = global_dataset
             self.global_loader = DataLoader(global_dataset, batch_size=128, shuffle=True)
@@ -47,8 +47,7 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         
         self.weights = parameters_to_ndarrays(initial_parameters)
 
-        self.client_cids = set()
-        self.client_models = {}
+        self.cluster_models = {i:copy.deepcopy(self.weights) for i in range(k_clusters)}
         
     def initialize_parameters(self, client_manager):
         initial_parameters = ndarrays_to_parameters(self.weights)        
@@ -63,15 +62,15 @@ class FlowerStrategy(fl.server.strategy.Strategy):
 
         fit_configurations = []
 
-        for client in clients :
-            if client.cid in self.client_models:
-                client_parameters = ndarrays_to_parameters(self.client_models[client.cid])                
-            else:
-                client_parameters = ndarrays_to_parameters(self.weights)
-                self.client_cids.add(client.cid)
-                self.client_models[client.cid] = self.weights 
+        stacked_weights = []
+        for i in range(self.k_clusters):
+            stacked_weights.extend(self.cluster_models[i])
+        
+        stacked_parameters = ndarrays_to_parameters(stacked_weights)
 
-            fitins = fl.common.FitIns(client_parameters, {"server_round":server_round})
+        for client in clients :
+            # pass all the cluster models
+            fitins = fl.common.FitIns(stacked_parameters, {"server_round":server_round, "k_clusters":self.k_clusters, "layers_per_model":self.model_layer_counts})
             fit_configurations.append((client, fitins))
 
         return fit_configurations
@@ -97,34 +96,23 @@ class FlowerStrategy(fl.server.strategy.Strategy):
                     print(f"    Failure {i}: {failure}")
 
         loss_aggregated = []
-        client_weights = {}
-        to_aggregate = defaultdict(list)
-
+        cluster_to_clients = defaultdict(list)
+        
         for client, fit_res in results:
-            w = parameters_to_ndarrays(fit_res.parameters)
-            client_weights[client.cid] = (w, fit_res.num_examples)
+            w = parameters_to_ndarrays(fit_res.parameters)            
             loss_aggregated.append(fit_res.metrics['train_loss'])
-            self.client_models[client.cid] = w
+            cluster_to_clients[fit_res.metrics['assigned_cluster']].append((client.cid, fit_res.num_examples, w))
+            
 
-        active_cids = list(client_weights.keys())
+        for i in range(self.k_clusters):
+            if i in cluster_to_clients:
+                self.cluster_models[i] = self.cluster_aggregate(cluster_to_clients[i])
+            else:
+                pass 
 
-        distances = self.calculate_pairwise_distances(client_weights, active_cids)
-        similarities = self.get_topk_similarities(server_round, distances, active_cids)
-        
-        for node_cid in active_cids:
-            for nei_cid in active_cids:
-                sim = similarities.get((node_cid, nei_cid), 0.0)
-                w_nei, n_nei = client_weights[nei_cid]
+        metrics = {"avg_train_loss": sum(loss_aggregated) / len(loss_aggregated)}
 
-                if sim > 0:
-                    to_aggregate[node_cid].append((w_nei, n_nei, sim))
-        
-        for client_cid, neighbors in to_aggregate.items():
-            self.client_models[client_cid] = self.similarity_aggregate(neighbors)
-        
-        metrics = {"avg_train_loss": sum(loss_aggregated) / len(loss_aggregated), "similarity_scores": similarities}
-
-        return ndarrays_to_parameters(self.client_models[active_cids[0]]), metrics
+        return ndarrays_to_parameters(self.cluster_models[0]), metrics
 
     def configure_evaluate(
         self, server_round: int, parameters: Parameters, client_manager: fl.server.client_manager.ClientManager
@@ -136,15 +124,15 @@ class FlowerStrategy(fl.server.strategy.Strategy):
 
         evaluate_configurations = []
 
-        for client in clients :
-            if client.cid in self.client_models:
-                client_parameters = ndarrays_to_parameters(self.client_models[client.cid])                
-            else:
-                client_parameters = ndarrays_to_parameters(self.weights)
-                self.client_cids.add(client.cid)
-                self.client_models[client.cid] = self.weights
+        stacked_weights = []
+        for i in range(self.k_clusters):
+            stacked_weights.extend(self.cluster_models[i])
+        
+        stacked_parameters = ndarrays_to_parameters(stacked_weights)
 
-            evaluate_ins = EvaluateIns(client_parameters, {"server_round":server_round})
+        for client in clients :
+            # pass all the cluster models
+            evaluate_ins = EvaluateIns(stacked_parameters, {"server_round":server_round, "k_clusters":self.k_clusters, "layers_per_model":self.model_layer_counts})
             evaluate_configurations.append((client, evaluate_ins))
 
         return evaluate_configurations
@@ -173,8 +161,11 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         accuracies = [r.metrics["val_acc"] * r.num_examples for _, r in results]
         examples = [r.num_examples for _, r in results]
         losses = [r.metrics['val_loss'] * r.num_examples for _, r in results]
-
-
+       
+        cluster_assignments = defaultdict(list)
+        for client, eval_res in results:
+            cluster_assignments[eval_res.metrics['assigned_cluster']].append(client.cid)
+       
         if sum(examples) == 0:
             weighted_acc = 0
             weighted_loss = 0
@@ -185,7 +176,7 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         clear_output(wait=True)
         print(f"Round {server_round} - Average Accuracy of Personalized Models: {weighted_acc * 100:.2f}%")
 
-        return float(weighted_loss), {"accuracy": float(weighted_acc)}
+        return float(weighted_loss), {"accuracy": float(weighted_acc), "cluster_assignments":cluster_assignments}
 
     def evaluate(self, server_round: int, parameters: Parameters) -> Optional[Tuple[float, Dict[str, float]]]:
         """
@@ -195,63 +186,17 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         """       
         return None      
     
-    def flatten(self, weights_ndarrays : NDArrays):
-        return np.hstack([layer.flatten() for layer in weights_ndarrays])
-    
-    def get_topk_similarities(self, server_round, distances, activate_cids):
-        
-        valid_dists = [v for v in distances.values() if v > 0]
-        if not valid_dists:
-            sigma = 1.0
-        else:
-            sigma = np.quantile(valid_dists, 0.5)
-            if sigma == 0: sigma = 1.0 
+    def cluster_aggregate(self, clients_weights : List[tuple[str, int, NDArrays]]) -> NDArrays:    
 
-        similarities = {}
-
-        for client_a in activate_cids:
-            candidates = []
-            for client_b in activate_cids:
-                candidates.append((client_b, math.exp(-distances[(client_a, client_b)]/sigma)))
-            
-            candidates.sort(key=lambda x:x[1], reverse=True)
-
-            for i, (nei, similarity) in enumerate(candidates):
-                if  server_round < self.start_knn:
-                    similarities[(client_a, nei)] = similarity
-                elif i <= self.topk:
-                    similarities[(client_a, nei)] = similarity
-                else:
-                    similarities[(client_a, nei)] = 0
-        
-        return similarities
-
-    def calculate_pairwise_distances(self, client_weights : Dict[int, Tuple[NDArrays, int]], active_cids) -> Dict[Tuple[int, int], float]:
-
-        distances = {}
-        flat_vecs = {cid: self.flatten(client_weights[cid][0]) for cid in active_cids}
-
-        for client_a in active_cids:
-            for client_b in active_cids:
-                if client_a == client_b:
-                    distances[(client_a, client_b)] = 0.0
-                else:
-                    dist = np.linalg.norm(flat_vecs[client_a] - flat_vecs[client_b], ord=2)
-                    distances[(client_a, client_b)] = float(dist)
-
-        return distances
-    
-    def similarity_aggregate(self, client_neighbours : list[tuple[NDArrays, int, float]]) -> NDArrays:    
-
-        sum_aggregation_weights = sum(num_examples * similarity for (_, num_examples, similarity) in client_neighbours) 
+        num_clients = len(clients_weights)
 
         weighted_weights = [
-            [layer * num_examples * similarity for layer in weights] for weights, num_examples, similarity in client_neighbours
+            [layer  for layer in weights] for _, _, weights in clients_weights
         ]
 
         # Compute average weights of each layer
         weights_prime: NDArrays = [
-            reduce(np.add, layer_updates) / sum_aggregation_weights
+            reduce(np.add, layer_updates) / num_clients
             for layer_updates in zip(*weighted_weights, strict=True)
         ]
         return weights_prime
