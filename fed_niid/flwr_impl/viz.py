@@ -27,7 +27,6 @@ def get_exp_label(config):
     # Optional: Add note if it's short
     # note = config.get('note', '')
     # if note: label += f" - {note[:10]}"
-    
     return label
 
 def plot_compare_experiments(filepaths, save_path=None):
@@ -58,6 +57,9 @@ def plot_compare_experiments(filepaths, save_path=None):
     # Exclude specific keys (like your previous code)
     if "similarity_scores" in metric_keys:
         metric_keys.remove("similarity_scores")
+    
+    if "cluster_assignments" in metric_keys:
+        metric_keys.remove("cluster_assignments")
 
     # 3. Determine layout
     # 1 plot for Loss + 1 plot per unique metric
@@ -154,7 +156,8 @@ if __name__ == "__main__":
     files_to_compare = [
         "results (client evaluation on val loader)\history_cifar10_fedema_nc_10_m_100_data_drift.pkl",    
         "results (client evaluation on val loader)\history_cifar10_fedknn_nc_10_m_100_data_drift.pkl"    ,
-        "results (client evaluation on val loader)\history_cifar10_fedprox_nc_10_m_100_data_drift.pkl"
+        "results (client evaluation on val loader)\history_cifar10_fedprox_nc_10_m_100_data_drift.pkl",
+        "results (client evaluation on val loader)\history_cifar10_ifca_nc_10_m_100_data_drift.pkl"
     ]
     
     plot_compare_experiments(files_to_compare, save_path="./plots/data_drift_100_participation.png")

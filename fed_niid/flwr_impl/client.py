@@ -45,13 +45,15 @@ class FlowerClient(fl.client.NumPyClient):
                 optimizer.zero_grad()
                 output = self.net(images)
 
-                # No proximal loss for now
-                # proximal_term = 0.0
-                # for local_weights, global_weights in zip(self.net.parameters(), global_params):
-                #     proximal_term += (local_weights - global_weights).norm(2)**2
-                # loss = criterion(output, labels) + (self.config.prox_lambda / 2) * proximal_term
-
-                loss = criterion(output, labels)
+                # proximal loss coefficient controls between fedavg and fedprox
+                if self.config.prox_lambda > 0:
+                    proximal_term = 0.0
+                    for local_weights, global_weights in zip(self.net.parameters(), global_params):
+                        proximal_term += (local_weights - global_weights).norm(2)**2
+                                
+                    loss = criterion(output, labels) + (self.config.prox_lambda / 2) * proximal_term
+                else:
+                    loss = criterion(output, labels)
 
                 loss.backward()
                 optimizer.step()
