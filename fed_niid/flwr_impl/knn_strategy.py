@@ -171,21 +171,29 @@ class FlowerStrategy(fl.server.strategy.Strategy):
 
 
         accuracies = [r.metrics["val_acc"] * r.num_examples for _, r in results]
+        precisions = [r.metrics["macro_precision"] * r.num_examples for _, r in results]
+        recalls = [r.metrics["macro_recall"] * r.num_examples for _, r in results]
+        f1_scores = [r.metrics["macro_f1"] * r.num_examples for _, r in results]
+        
         examples = [r.num_examples for _, r in results]
         losses = [r.metrics['val_loss'] * r.num_examples for _, r in results]
 
-
-        if sum(examples) == 0:
+        total_examples = sum(examples)
+        if total_examples == 0:
             weighted_acc = 0
             weighted_loss = 0
         else:
-            weighted_acc = sum(accuracies) / sum(examples)
-            weighted_loss = sum(losses) / sum(examples)
+            weighted_acc = sum(accuracies) / total_examples
+            weighted_loss = sum(losses) / total_examples
+            weighted_pr = sum(precisions) / total_examples
+            weighted_re = sum(recalls) / total_examples
+            weighted_f1 = sum(f1_scores) / total_examples
 
         clear_output(wait=True)
-        print(f"Round {server_round} - Average Accuracy of Personalized Models: {weighted_acc * 100:.2f}%")
+        print(f"Round {server_round} - Average Accuracy of Personalized Models: {weighted_acc * 100:.2f}%\n Average Precision: {weighted_pr * 100:.2f}\n Average Recall: {weighted_re * 100:.2f}\n Average F1: {weighted_f1 * 100:.2f}")
 
-        return float(weighted_loss), {"accuracy": float(weighted_acc)}
+        return float(weighted_loss), {"accuracy": float(weighted_acc), "precision":float(weighted_pr), "recall":float(weighted_re), "f1_score":float(weighted_f1)}
+
 
     def evaluate(self, server_round: int, parameters: Parameters) -> Optional[Tuple[float, Dict[str, float]]]:
         """

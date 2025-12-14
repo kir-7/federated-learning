@@ -1,7 +1,7 @@
 import flwr as fl
 import torch
 from torch.utils.data import DataLoader
-
+from sklearn.metrics import precision_recall_fscore_support
 class FlowerClient(fl.client.NumPyClient):
     def __init__(self, cid, net, train_dataset, val_dataset, config):
         self.cid = cid
@@ -71,6 +71,9 @@ class FlowerClient(fl.client.NumPyClient):
         correct, total = 0, 0
         criterion = torch.nn.CrossEntropyLoss()
         losses = []
+        y_true = []
+        y_pred = []
+
         with torch.no_grad():
             for sample in self.val_loader:
                 images, labels = sample['img'], sample['label']
@@ -83,7 +86,11 @@ class FlowerClient(fl.client.NumPyClient):
                 _, predicted = torch.max(outputs, 1)
                 total += labels.size(0)
                 correct += (predicted == labels).sum().item()
+                y_true.extend(labels.detach().cpu().tolist())
+                y_pred.extend(predicted.detach().cpu().tolist())
 
+        macro_precision, macro_recall, macro_f1, _ = precision_recall_fscore_support(y_true, y_pred, average='macro')
+        
         accuracy = correct / total
         final_loss = sum(losses) / len(losses)
-        return final_loss, len(self.val_dataset), {"val_acc": accuracy, "data_samples":len(self.val_dataset), "val_loss":final_loss}
+        return final_loss, len(self.val_dataset), {"val_acc": accuracy, "macro_precision":macro_precision, "macro_recall":macro_recall, "macro_f1":macro_f1, "data_samples":len(self.val_dataset), "val_loss":final_loss}

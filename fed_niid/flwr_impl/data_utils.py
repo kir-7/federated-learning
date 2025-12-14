@@ -156,7 +156,6 @@ def get_transforms_cifar10(self):
     return train_transform, val_transform
 
 
-
 if __name__ == '__main__':
     # example to generate client partitions
    

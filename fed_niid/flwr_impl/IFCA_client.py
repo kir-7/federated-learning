@@ -2,6 +2,7 @@ import flwr as fl
 import torch
 from torch.utils.data import DataLoader, Subset
 import copy
+from sklearn.metrics import precision_recall_fscore_support
 
 class FlowerClient(fl.client.NumPyClient):
     def __init__(self, cid, net, train_dataset, val_dataset, config):
@@ -162,11 +163,13 @@ class FlowerClient(fl.client.NumPyClient):
         correct, total = 0, 0
         criterion = torch.nn.CrossEntropyLoss()
         losses = []
+        y_true, y_pred = [], [] 
+
         with torch.no_grad():
             for sample in val_loader:
                 images, labels = sample['img'], sample['label']
                 images, labels = images.to(self.device), labels.to(self.device)
-                outputs = self.net(images)
+                outputs = self.net(images) 
 
                 loss = criterion(outputs, labels)
                 losses.append(loss.item())
@@ -175,10 +178,15 @@ class FlowerClient(fl.client.NumPyClient):
                 total += labels.size(0)
                 correct += (predicted == labels).sum().item()
 
+                y_true.extend(labels.detach().cpu().tolist())
+                y_pred.extend(predicted.detach().cpu().tolist())
+
+        macro_precision, macro_recall, macro_f1, _ = precision_recall_fscore_support(y_true, y_pred, average='macro')
+        
         accuracy = correct / total
         final_loss = sum(losses) / len(losses)
-        return final_loss, len(val_data), {"val_acc": accuracy, "data_samples":len(val_data), "val_loss":final_loss, "assigned_cluster":assigned_cluster}
-
+        return final_loss, len(val_data), {"val_acc": accuracy, "data_samples":len(val_data), "macro_precision":macro_precision, "macro_recall":macro_recall, "macro_f1":macro_f1, "val_loss":final_loss, "assigned_cluster":assigned_cluster}
+    
     @torch.no_grad()
     def calculate_loss(self, parameters, data_loader):
 

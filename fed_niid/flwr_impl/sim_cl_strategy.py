@@ -105,7 +105,7 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         
         cluster_to_clients = defaultdict(list)
 
-        for client_cid, cluster_id in self.client_cluster_map:
+        for client_cid, cluster_id in self.client_cluster_map.items():
             if client_cid in active_cids:
                 cluster_to_clients[cluster_id].append(client_weights[client_cid])
 
@@ -158,20 +158,28 @@ class FlowerStrategy(fl.server.strategy.Strategy):
                     print(f"Client {fail[0].cid} failed: {fail[1]}")
 
         accuracies = [r.metrics["val_acc"] * r.num_examples for _, r in results]
+        precisions = [r.metrics["macro_precision"] * r.num_examples for _, r in results]
+        recalls = [r.metrics["macro_recall"] * r.num_examples for _, r in results]
+        f1_scores = [r.metrics["macro_f1"] * r.num_examples for _, r in results]
+        
         examples = [r.num_examples for _, r in results]
         losses = [r.metrics['val_loss'] * r.num_examples for _, r in results]
-              
-        if sum(examples) == 0:
+
+        total_examples = sum(examples)
+        if total_examples == 0:
             weighted_acc = 0
             weighted_loss = 0
         else:
-            weighted_acc = sum(accuracies) / sum(examples)
-            weighted_loss = sum(losses) / sum(examples)
+            weighted_acc = sum(accuracies) / total_examples
+            weighted_loss = sum(losses) / total_examples
+            weighted_pr = sum(precisions) / total_examples
+            weighted_re = sum(recalls) / total_examples
+            weighted_f1 = sum(f1_scores) / total_examples
 
         clear_output(wait=True)
-        print(f"Round {server_round} - Average Accuracy of Personalized Models: {weighted_acc * 100:.2f}%")
+        print(f"Round {server_round} - Average Accuracy of Personalized Models: {weighted_acc * 100:.2f}%\n Average Precision: {weighted_pr * 100:.2f}\n Average Recall: {weighted_re * 100:.2f}\n Average F1: {weighted_f1 * 100:.2f}")
 
-        return float(weighted_loss), {"accuracy": float(weighted_acc), "cluster_assignments":copy.deepcopy(self.client_cluster_map)}
+        return float(weighted_loss), {"accuracy": float(weighted_acc), "precision":float(weighted_pr), "recall":float(weighted_re), "f1_score":float(weighted_f1), "cluster_assignments":copy.deepcopy(self.client_cluster_map)}
 
     def evaluate(self, server_round: int, parameters: Parameters) -> Optional[Tuple[float, Dict[str, float]]]:
         """
@@ -181,17 +189,17 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         """       
         return None      
     
-    def cluster_aggregate(self, clients_weights : List[tuple[str, int, NDArrays]]) -> NDArrays:    
+    def cluster_aggregate(self, clients_weights : List[tuple[NDArrays, int]]) -> NDArrays:    
 
-        num_clients = len(clients_weights)
+        sum_aggregation_weights = sum(num_examples for (_, num_examples) in clients_weights) 
 
         weighted_weights = [
-            [layer  for layer in weights] for _, _, weights in clients_weights
+            [layer * num_examples  for layer in weights] for weights, num_examples in clients_weights
         ]
 
         # Compute average weights of each layer
         weights_prime: NDArrays = [
-            reduce(np.add, layer_updates) / num_clients
+            reduce(np.add, layer_updates) / sum_aggregation_weights
             for layer_updates in zip(*weighted_weights, strict=True)
         ]
         return weights_prime
@@ -218,25 +226,18 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         # return the mapping of each client to corresponding cluster
         
         distances = self.calculate_pairwise_distances(client_weights, active_cids)
-
-        valid_dists = [v for v in distances.values() if v > 0]
-        if not valid_dists:
-            sigma = 1.0
-        else:
-            sigma = np.quantile(valid_dists, 0.5)
-            if sigma == 0: sigma = 1.0 
         
         ids_to_cids = {}
         for i in range(len(active_cids)):
             ids_to_cids[i] = active_cids[i]
         
         cids_to_ids = {v:k for k, v in ids_to_cids.items()}
-        similarities = np.zeros((len(active_cids), len(active_cids)))
+        distance_mat = np.zeros((len(active_cids), len(active_cids)))
 
         for (client_a, client_b), dist in distances.items():
-            similarities[cids_to_ids[client_a], cids_to_ids[client_b]] = math.exp(-dist/sigma)
+            distance_mat[cids_to_ids[client_a], cids_to_ids[client_b]] = dist
         
-        clustering = AgglomerativeClustering(n_clusters=self.k_clusters, metric='precomputed', linkage='complete').fit_predict(similarities)
+        clustering = AgglomerativeClustering(n_clusters=self.k_clusters, metric='precomputed', linkage='complete').fit_predict(distance_mat)
         
         client_cluster_map = copy.deepcopy(self.client_cluster_map)
         for client_id, cluster_id in enumerate(clustering.labels_):

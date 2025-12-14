@@ -25,12 +25,11 @@ class FedConfig:
     n_classes : int = 10
     model : str = 'mnist'
 
-    algorithm : str = 'fed_g_prox'
+    algorithm : str = 'fedavg'
     prox_lambda : float = 0.25
     k_neighbours : float = 0.4
     ema_alpha : float = 0.75
-
-    n_communities : int = 3
+    num_clusters : int = 3
 
     client_bs: int = 32
     global_bs: int = 32
@@ -45,37 +44,44 @@ class FedConfig:
     # seed
     torch_seed: int = 42
     np_seed: int = 43
+    rand_seed : int = 44
 
-    local_eval_every : int  = 3
-    start_graph : int = 10
-    swap_dist_every : int = 8
+    init_data_usage : float = 1.0
+    data_drift_every : int = 11
 
-    log_dir : str = "checkpoints"
     verbose: bool = True
+    note: str = "Notes"
 
 config = FedConfig(
-    n_clients=3,
-    n_classes=10,
-    client_lr=1e-3,
-    dataset='cifar10',
-    sampling_method='pathological',
-
-    k_neighbours = 1.0,
-    prox_lambda = 0.001,
-
-    dirichlet_alpha=0.5,
-    model='cnn',
+    n_clients=10,
     m=1,
-    global_rounds=10,
+    model='cnn',
+    
+    dataset='cifar10',
+    n_classes=10,
+    sampling_method='pathological',
+    dirichlet_alpha=0.5,
+    
+    algorithm="ifca",
+    k_neighbours = 0.4,
+    prox_lambda = 0.001,
+    ema_alpha=0.99,
+    num_clusters=3,
+    
+    global_rounds=30,
     client_epochs=3,
     client_bs=64,
     global_bs=128,
+    client_lr=1e-3,
+    
+    init_data_usage=0.5,
+    data_drift_every=10,
 
-    local_eval_every = 1,
-    swap_dist_every = 51,
-    start_graph = 10,
-    log_dir='checkpoints_3'
+    verbose=True,
+
+    note="IFCA algorithm, with num clusters=3, using init_data_usage with 0.5 with data being increased every 10 rounds, this doesn't use proximal loss term"
 )
+
 
 torch.manual_seed(config.torch_seed)
 np.random.seed(config.np_seed)
