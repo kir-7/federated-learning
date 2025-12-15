@@ -28,12 +28,16 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         fraction_evaluate:float =1.0,
         global_dataset=None,
         global_bs=None,
+        evaluate_frequency:int=5,
+        total_rounds:int=30,
         model_layer_counts:int=None
     ):
         self.num_clients = num_clients
         self.fraction_fit = fraction_fit
         self.fraction_evaluate = fraction_evaluate
         self.k_clusters = k_clusters
+        self.evaluate_freq = evaluate_frequency
+        self.total_rounds = total_rounds
 
         assert model_layer_counts is not None, "Model Layer counts need to be passes"
 
@@ -117,25 +121,30 @@ class FlowerStrategy(fl.server.strategy.Strategy):
     def configure_evaluate(
         self, server_round: int, parameters: Parameters, client_manager: fl.server.client_manager.ClientManager
     ) -> List[Tuple[fl.server.client_proxy.ClientProxy, EvaluateIns]]:
-
-        # Sample clients for evaluation
-        sample_size = int(self.num_clients * self.fraction_evaluate)
-        clients = client_manager.sample(sample_size, min_num_clients=1)
-
-        evaluate_configurations = []
-
-        stacked_weights = []
-        for i in range(self.k_clusters):
-            stacked_weights.extend(self.cluster_models[i])
         
-        stacked_parameters = ndarrays_to_parameters(stacked_weights)
+        if server_round==1 or server_round % self.evaluate_freq == 0 or server_round == self.total_rounds:
+        
+            # Sample clients for evaluation
+            sample_size = int(self.num_clients * self.fraction_evaluate)
+            clients = client_manager.sample(sample_size, min_num_clients=1)
 
-        for client in clients :
-            # pass all the cluster models
-            evaluate_ins = EvaluateIns(stacked_parameters, {"server_round":server_round, "k_clusters":self.k_clusters, "layers_per_model":self.model_layer_counts})
-            evaluate_configurations.append((client, evaluate_ins))
+            evaluate_configurations = []
 
-        return evaluate_configurations
+            stacked_weights = []
+            for i in range(self.k_clusters):
+                stacked_weights.extend(self.cluster_models[i])
+            
+            stacked_parameters = ndarrays_to_parameters(stacked_weights)
+
+            for client in clients :
+                # pass all the cluster models
+                evaluate_ins = EvaluateIns(stacked_parameters, {"server_round":server_round, "k_clusters":self.k_clusters, "layers_per_model":self.model_layer_counts})
+                evaluate_configurations.append((client, evaluate_ins))
+
+            return evaluate_configurations
+        
+        else:
+            return []
 
     def aggregate_evaluate(
         self,

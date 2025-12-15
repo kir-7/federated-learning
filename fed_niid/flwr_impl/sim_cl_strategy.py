@@ -27,6 +27,8 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         k_clusters:int = 3,
         fraction_fit: float = 1.0,
         fraction_evaluate:float =1.0,
+        evaluate_frequency:int=4,
+        total_round:int=40,
         global_dataset=None,
         global_bs=None,
     ):
@@ -34,23 +36,25 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         self.fraction_fit = fraction_fit
         self.fraction_evaluate = fraction_evaluate
         self.k_clusters = k_clusters
-                
+        self.evaluate_freq = evaluate_frequency
+        self.total_rounds = total_round
+
         if global_dataset and global_bs:
             self.global_dataset = global_dataset
             self.global_loader = DataLoader(global_dataset, batch_size=128, shuffle=True)
         else:
             self.global_dataset, self.global_loader = None, None
-        
+
         self.weights = parameters_to_ndarrays(initial_parameters)
 
+        self.client_cluster_map = {}
         self.cluster_models = {i:copy.deepcopy(self.weights) for i in range(k_clusters)}
-        
-    def initialize_parameters(self, client_manager):
-        
-        # get all the client cids from the manager
-        self.client_cluster_map = self.cluster_clients({client_cid:copy.deepcopy(self.weights) for client_cid, client in client_manager.all()})
 
-        initial_parameters = ndarrays_to_parameters(self.weights)        
+    def initialize_parameters(self, client_manager):
+
+        # get all the client cids from the manager
+        self.client_cluster_map = self.cluster_clients({client_cid:copy.deepcopy(self.weights) for client_cid, client in client_manager.all().items()}, list(client_manager.all().keys()))
+        initial_parameters = ndarrays_to_parameters(self.weights)
         return initial_parameters
 
     def configure_fit(
@@ -64,8 +68,8 @@ class FlowerStrategy(fl.server.strategy.Strategy):
 
         for client in clients :
 
-            cluster_id = self.client_cluster_map[client.cid]         
-            fitins = fl.common.FitIns(self.cluster_models[cluster_id], {"server_round":server_round, "cluster_id":cluster_id})
+            cluster_id = self.client_cluster_map[client.cid]
+            fitins = fl.common.FitIns(ndarrays_to_parameters(self.cluster_models[cluster_id]), {"server_round":server_round, "cluster_id":cluster_id})
             fit_configurations.append((client, fitins))
 
         return fit_configurations
@@ -91,18 +95,18 @@ class FlowerStrategy(fl.server.strategy.Strategy):
                     print(f"    Failure {i}: {failure}")
 
         loss_aggregated = []
-        
+
         client_weights = {}
-        
+
         for client, fit_res in results:
-            w = parameters_to_ndarrays(fit_res.parameters)            
+            w = parameters_to_ndarrays(fit_res.parameters)
             loss_aggregated.append(fit_res.metrics['train_loss'])
-            client_weights[client.cid] = (w, fit_res.metrics['num_examples'])            
+            client_weights[client.cid] = (w, fit_res.num_examples)
 
         active_cids = list(client_weights.keys())
 
         self.client_cluster_map = self.cluster_clients(client_weights, active_cids)
-        
+
         cluster_to_clients = defaultdict(list)
 
         for client_cid, cluster_id in self.client_cluster_map.items():
@@ -113,7 +117,7 @@ class FlowerStrategy(fl.server.strategy.Strategy):
             if i in cluster_to_clients:
                 self.cluster_models[i] = self.cluster_aggregate(cluster_to_clients[i])
             else:
-                pass 
+                pass
 
         metrics = {"avg_train_loss": sum(loss_aggregated) / len(loss_aggregated)}
 
@@ -123,20 +127,24 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         self, server_round: int, parameters: Parameters, client_manager: fl.server.client_manager.ClientManager
     ) -> List[Tuple[fl.server.client_proxy.ClientProxy, EvaluateIns]]:
 
-        # Sample clients for evaluation
-        sample_size = int(self.num_clients * self.fraction_evaluate)
-        clients = client_manager.sample(sample_size, min_num_clients=1)
+        if server_round==1 or server_round % self.evaluate_freq == 0 or server_round == self.total_rounds:
+            
+            # Sample clients for evaluation
+            sample_size = int(self.num_clients * self.fraction_evaluate)
+            clients = client_manager.sample(sample_size, min_num_clients=1)
 
-        evaluate_configurations = []
+            evaluate_configurations = []
 
-        for client in clients :
-            cluster_id = self.client_cluster_map[client.cid]
+            for client in clients :
+                cluster_id = self.client_cluster_map[client.cid]
 
-            evaluate_ins = EvaluateIns(self.cluster_models[cluster_id], {"server_round":server_round, "cluster_id":cluster_id})
-            evaluate_configurations.append((client, evaluate_ins))
+                evaluate_ins = EvaluateIns(ndarrays_to_parameters(self.cluster_models[cluster_id]), {"server_round":server_round, "cluster_id":cluster_id})
+                evaluate_configurations.append((client, evaluate_ins))
 
-        return evaluate_configurations
-
+            return evaluate_configurations
+        else:
+            return []
+        
     def aggregate_evaluate(
         self,
         server_round: int,
@@ -161,7 +169,7 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         precisions = [r.metrics["macro_precision"] * r.num_examples for _, r in results]
         recalls = [r.metrics["macro_recall"] * r.num_examples for _, r in results]
         f1_scores = [r.metrics["macro_f1"] * r.num_examples for _, r in results]
-        
+
         examples = [r.num_examples for _, r in results]
         losses = [r.metrics['val_loss'] * r.num_examples for _, r in results]
 
@@ -186,12 +194,12 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         Evaluate the global centroid model on server-side data (if available).
         To use this, pass an 'evaluate_fn' to the Strategy if you want custom logic,
         otherwise, return None implies no centralized evaluation.
-        """       
-        return None      
-    
-    def cluster_aggregate(self, clients_weights : List[tuple[NDArrays, int]]) -> NDArrays:    
+        """
+        return None
 
-        sum_aggregation_weights = sum(num_examples for (_, num_examples) in clients_weights) 
+    def cluster_aggregate(self, clients_weights : List[tuple[NDArrays, int]]) -> NDArrays:
+
+        sum_aggregation_weights = sum(num_examples for (_, num_examples) in clients_weights)
 
         weighted_weights = [
             [layer * num_examples  for layer in weights] for weights, num_examples in clients_weights
@@ -205,9 +213,9 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         return weights_prime
 
     def flatten(self, weights_ndarrays : NDArrays):
-        return np.hstack([layer.flatten() for layer in weights_ndarrays])    
+        return np.hstack([layer.flatten() for layer in weights_ndarrays])
 
-    def calculate_pairwise_distances(self, client_weights : Dict[int, Tuple[NDArrays, int]], active_cids) -> Dict[Tuple[int, int], float]:
+    def calculate_pairwise_distances(self, client_weights : Dict[str, Tuple[NDArrays, int]], active_cids) -> Dict[Tuple[int, int], float]:
 
         distances = {}
         flat_vecs = {cid: self.flatten(client_weights[cid][0]) for cid in active_cids}
@@ -220,27 +228,28 @@ class FlowerStrategy(fl.server.strategy.Strategy):
                     dist = np.linalg.norm(flat_vecs[client_a] - flat_vecs[client_b], ord=2)
                     distances[(client_a, client_b)] = float(dist)
 
-        return distances                
+        return distances
 
-    def cluster_clients(self, client_weights : Dict[int, Tuple[NDArrays, int]], active_cids) -> Dict[Tuple[int, int], float]:
+    def cluster_clients(self, client_weights : Dict[str, Tuple[NDArrays, int]], active_cids) -> Dict[Tuple[int, int], float]:
         # return the mapping of each client to corresponding cluster
-        
+
         distances = self.calculate_pairwise_distances(client_weights, active_cids)
-        
+
         ids_to_cids = {}
         for i in range(len(active_cids)):
             ids_to_cids[i] = active_cids[i]
-        
+
         cids_to_ids = {v:k for k, v in ids_to_cids.items()}
         distance_mat = np.zeros((len(active_cids), len(active_cids)))
 
         for (client_a, client_b), dist in distances.items():
             distance_mat[cids_to_ids[client_a], cids_to_ids[client_b]] = dist
-        
-        clustering = AgglomerativeClustering(n_clusters=self.k_clusters, metric='precomputed', linkage='complete').fit_predict(distance_mat)
-        
+
+        labels = AgglomerativeClustering(n_clusters=self.k_clusters, metric='precomputed', linkage='complete').fit_predict(distance_mat)
+
         client_cluster_map = copy.deepcopy(self.client_cluster_map)
-        for client_id, cluster_id in enumerate(clustering.labels_):
-            client_cluster_map[ids_to_cids[client_id]] = cluster_id
+
+        for client_id, cluster_id in enumerate(labels):
+            client_cluster_map[ids_to_cids[client_id]] = int(cluster_id)
 
         return client_cluster_map

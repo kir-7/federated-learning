@@ -121,13 +121,16 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         self, server_round: int, parameters: Parameters, client_manager: fl.server.client_manager.ClientManager
     ) -> List[Tuple[fl.server.client_proxy.ClientProxy, EvaluateIns]]:
 
-        # Sample clients for evaluation
-        sample_size = int(self.num_clients * self.fraction_evaluate)
-        clients = client_manager.sample(sample_size, min_num_clients=1)
+        if server_round==1 or server_round % self.evaluate_freq == 0 or server_round == self.total_rounds:
+            # Sample clients for evaluation
+            sample_size = int(self.num_clients * self.fraction_evaluate)
+            clients = client_manager.sample(sample_size, min_num_clients=1)
+            evaluate_ins = EvaluateIns(parameters, {"server_round":server_round})
 
-        evaluate_ins = EvaluateIns(parameters, {"server_round":server_round})
-
-        return [(client, evaluate_ins) for client in clients]
+            return [(client, evaluate_ins) for client in clients]
+        
+        else:
+            return []
 
     def aggregate_evaluate(
         self,

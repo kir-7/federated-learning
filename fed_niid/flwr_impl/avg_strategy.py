@@ -22,6 +22,8 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         sigma_threshold: float = 1.0,
         fraction_fit: float = 1.0,
         fraction_evaluate: float=1.0,
+        evaluate_frequency:int = 5,
+        total_rounds:int = 30,
         global_dataset=None,
         global_bs=None
     ):
@@ -29,7 +31,9 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         self.sigma_threshold = sigma_threshold
         self.fraction_fit = fraction_fit
         self.fraction_evaluate = fraction_evaluate
-        
+        self.evaluate_freq = evaluate_frequency
+        self.total_rounds = total_rounds
+
         if global_dataset and global_bs:
             self.global_dataset = global_dataset
             self.global_loader = DataLoader(global_dataset, batch_size=128, shuffle=True)
@@ -97,14 +101,18 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         self, server_round: int, parameters: Parameters, client_manager: fl.server.client_manager.ClientManager
     ) -> List[Tuple[fl.server.client_proxy.ClientProxy, EvaluateIns]]:
 
-        # Sample clients for evaluation
-        sample_size = int(self.num_clients * self.fraction_evaluate)
-        clients = client_manager.sample(sample_size, min_num_clients=1)
+        if server_round==1 or server_round % self.evaluate_freq == 0 or server_round == self.total_rounds:
+            # Sample clients for evaluation
+            sample_size = int(self.num_clients * self.fraction_evaluate)
+            clients = client_manager.sample(sample_size, min_num_clients=1)
 
-        eval_configurations = []
-        evaluate_ins = EvaluateIns(parameters, {"server_round":server_round})
+            eval_configurations = []
+            evaluate_ins = EvaluateIns(parameters, {"server_round":server_round})
 
-        return [(client, evaluate_ins) for client in clients]
+            return [(client, evaluate_ins) for client in clients]
+        
+        else:
+            return []
 
     def aggregate_evaluate(
         self,

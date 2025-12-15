@@ -45,10 +45,13 @@ class FlwrMNISTDataset(torch.utils.data.Dataset):
 
         if isinstance(raw_item, (tuple, list)):
             x, y = raw_item
-        else:
+        else:            
             x = raw_item['img']
-            y = raw_item['label']
-        
+            if 'label' in raw_item:  # for cifar10
+                y = raw_item['label']
+            elif 'fine_label' in raw_item:  # for cifar100
+                y = raw_item['fine_label']
+    
         if self.transform:
             x = self.transform(x)
         sample = {'img':x, 'label':y}

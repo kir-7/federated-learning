@@ -28,6 +28,8 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         fraction_evaluate:float =1.0,
         global_dataset=None,
         global_bs=None,
+        evaluate_frequency:int=5,
+        total_rounds:int=30,
         start_knn:int=5,
     ):
         self.num_clients = num_clients
@@ -36,6 +38,8 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         self.fraction_evaluate = fraction_evaluate
         self.k_neighbours = k_neighbours
         self.start_knn = start_knn
+        self.evaluate_freq = evaluate_frequency
+        self.total_rounds = total_rounds
  
         self.topk = max(1, int(k_neighbours * num_clients))
        
@@ -130,25 +134,29 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         self, server_round: int, parameters: Parameters, client_manager: fl.server.client_manager.ClientManager
     ) -> List[Tuple[fl.server.client_proxy.ClientProxy, EvaluateIns]]:
 
-        # Sample clients for evaluation
-        sample_size = int(self.num_clients * self.fraction_evaluate)
-        clients = client_manager.sample(sample_size, min_num_clients=1)
+        if server_round==1 or server_round % self.evaluate_freq == 0 or server_round == self.total_rounds:
+            
+            # Sample clients for evaluation
+            sample_size = int(self.num_clients * self.fraction_evaluate)
+            clients = client_manager.sample(sample_size, min_num_clients=1)
 
-        evaluate_configurations = []
+            evaluate_configurations = []
 
-        for client in clients :
-            if client.cid in self.client_models:
-                client_parameters = ndarrays_to_parameters(self.client_models[client.cid])                
-            else:
-                client_parameters = ndarrays_to_parameters(self.weights)
-                self.client_cids.add(client.cid)
-                self.client_models[client.cid] = self.weights
+            for client in clients :
+                if client.cid in self.client_models:
+                    client_parameters = ndarrays_to_parameters(self.client_models[client.cid])                
+                else:
+                    client_parameters = ndarrays_to_parameters(self.weights)
+                    self.client_cids.add(client.cid)
+                    self.client_models[client.cid] = self.weights
 
-            evaluate_ins = EvaluateIns(client_parameters, {"server_round":server_round})
-            evaluate_configurations.append((client, evaluate_ins))
+                evaluate_ins = EvaluateIns(client_parameters, {"server_round":server_round})
+                evaluate_configurations.append((client, evaluate_ins))
 
-        return evaluate_configurations
-
+            return evaluate_configurations
+        
+        else:
+            return []
     def aggregate_evaluate(
         self,
         server_round: int,
