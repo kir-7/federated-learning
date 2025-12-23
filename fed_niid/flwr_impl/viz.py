@@ -32,6 +32,7 @@ def get_exp_label(config):
 def plot_compare_experiments(filepaths, save_path=None):
     """
     Plots metrics from multiple experiment files on shared subplots.
+    Uses a 2x2 grid layout plus extra plots if needed.
     """
     # 1. Load all experiments
     experiments = []
@@ -49,12 +50,13 @@ def plot_compare_experiments(filepaths, save_path=None):
 
     # 2. Extract unique metric keys from ALL experiments
     metric_keys = set()
-    for (exp_name, exp) in experiments:
-        metric_keys.update(exp.get('metrics_distributed_fit', {}).keys())
-        metric_keys.update(exp.get('metrics_distributed', {}).keys())
-        metric_keys.update(exp.get('metrics_centralized', {}).keys())
+    metric_keys.add("accuracy")
+    metric_keys.add("avg_train_loss")
+    metric_keys.add('recall')
+    metric_keys.add('precision')
+    metric_keys.add('f1_score') 
 
-    # Exclude specific keys (like your previous code)
+    # Exclude specific keys
     if "similarity_scores" in metric_keys:
         metric_keys.remove("similarity_scores")
     
@@ -66,25 +68,34 @@ def plot_compare_experiments(filepaths, save_path=None):
     sorted_keys = sorted(list(metric_keys))
     num_plots = 1 + len(sorted_keys)
     
-    fig, axes = plt.subplots(num_plots, 1, figsize=(12, 6 * num_plots))
-    if num_plots == 1: axes = [axes] # Handle single plot case
+    # Calculate grid dimensions (2 columns)
+    ncols = 2
+    nrows = (num_plots + 1) // 2  # Ceiling division
+    
+    fig, axes = plt.subplots(nrows, ncols, figsize=(14, 5 * nrows))
+    
+    # Flatten axes array for easier indexing
+    if num_plots == 1:
+        axes = [axes]
+    else:
+        axes = axes.flatten()
 
-    # Define a color cycle (so each experiment has a unique color)
+    # Define a color cycle
     colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
 
     # --- PLOT 1: LOSS COMPARISON ---
     ax = axes[0]
-    ax.set_title("Loss Evolution (Solid: Centralized, Dashed: Distributed)")
+    ax.set_title("Loss Evolution (Solid: Centralized, Dashed: Distributed)", fontsize=12, fontweight='bold')
     
-    for i, (base_label, exp) in enumerate(experiments):
+    for i, (_, exp) in enumerate(experiments):
         config = exp.get('Config', {})
-        # base_label = get_exp_label(config)
-        color = colors[i % len(colors)] # Cycle colors if > 10 experiments
+        base_label = f"exp1_{config['algorithm']}"
+
+        color = colors[i % len(colors)]
 
         # Centralized Loss (Solid Line, Square Marker)
         losses_cent = exp.get('losses_centralized', [])
         if losses_cent:
-            # Sort by round to be safe
             losses_cent.sort(key=lambda x: x[0])
             r, v = zip(*losses_cent)
             ax.plot(r, v, label=f'{base_label} [Cent]', 
@@ -98,18 +109,19 @@ def plot_compare_experiments(filepaths, save_path=None):
             ax.plot(r, v, label=f'{base_label} [Dist]', 
                     color=color, linestyle='--', marker='o', markersize=4, alpha=0.6)
 
-    ax.set_ylabel("Loss")
+    ax.set_ylabel("Loss", fontsize=10)
+    ax.set_xlabel("Server Round", fontsize=10)
     ax.grid(True, linestyle='--', alpha=0.5)
-    ax.legend()
+    ax.legend(fontsize=8)
     
     # --- PLOT 2+: METRICS COMPARISON ---
     for k, metric_name in enumerate(sorted_keys):
         ax = axes[k + 1]
-        ax.set_title(f"{metric_name.capitalize()} Evolution")
+        ax.set_title(f"{metric_name.capitalize()} Evolution", fontsize=12, fontweight='bold')
         
-        for i, (base_label, exp) in enumerate(experiments):
+        for i, (_, exp) in enumerate(experiments):
             config = exp.get('Config', {})
-            # base_label = get_exp_label(config)
+            base_label = f"exp1_{config['algorithm']}"
             color = colors[i % len(colors)]
 
             # 1. Centralized Eval (Solid, Square)
@@ -136,16 +148,19 @@ def plot_compare_experiments(filepaths, save_path=None):
                 ax.plot(r, v, label=f'{base_label} [Dist Train]', 
                         color=color, linestyle=':', marker='^', markersize=4, alpha=0.6)
 
-        ax.set_ylabel(metric_name)
-        ax.set_xlabel("Server Round")
+        ax.set_ylabel(metric_name, fontsize=10)
+        ax.set_xlabel("Server Round", fontsize=10)
         ax.grid(True, linestyle='--', alpha=0.5)
-        # Position legend outside if it's too crowded, or 'best'
-        ax.legend() 
+        ax.legend(fontsize=8)
+
+    # Hide any unused subplots
+    for idx in range(num_plots, len(axes)):
+        axes[idx].set_visible(False)
 
     plt.tight_layout()
     
     if save_path:
-        plt.savefig(save_path)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
         print(f"Plot saved to {save_path}")
     
     plt.show()
@@ -154,10 +169,11 @@ def plot_compare_experiments(filepaths, save_path=None):
 if __name__ == "__main__":
     # Define your files here
     files_to_compare = [
-        "results (client evaluation on val loader)\history_cifar10_fedema_nc_10_m_100_data_drift.pkl",    
-        "results (client evaluation on val loader)\history_cifar10_fedknn_nc_10_m_100_data_drift.pkl"    ,
-        "results (client evaluation on val loader)\history_cifar10_fedprox_nc_10_m_100_data_drift.pkl",
-        "results (client evaluation on val loader)\history_cifar10_ifca_nc_10_m_100_data_drift.pkl"
+        "experiments\exp3 m=30 patho 3 data drift\exp3_cifar10_fedavg_nc_40_m_30_data_drift.pkl",
+        "experiments\exp3 m=30 patho 3 data drift\exp3_cifar10_fedprox_nc_40_m_30_data_drift.pkl",
+        "experiments\exp3 m=30 patho 3 data drift\exp3_cifar10_fedknn_nc_40_m_30_data_drift.pkl",
+        "experiments\exp3 m=30 patho 3 data drift\exp3_cifar10_ifca_nc_40_m_30_data_drift.pkl",
+        
     ]
     
-    plot_compare_experiments(files_to_compare, save_path="./plots/data_drift_100_participation.png")
+    plot_compare_experiments(files_to_compare, save_path="plots/experiment3_noniid_data_drift_perf.png")

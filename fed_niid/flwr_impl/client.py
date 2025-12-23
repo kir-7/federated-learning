@@ -29,7 +29,7 @@ class FlowerClient(fl.client.NumPyClient):
         # should return parameters, num_examples, metrics 
         self.set_parameters(parameters)
 
-        global_params = [torch.tensor(p).to(self.device) for p in parameters]
+        global_params = [torch.tensor(p).to(self.device).detach().requires_grad_(False) for p in parameters]
         self.net.train()
 
         lr = self.get_lr(config['server_round'])
@@ -49,7 +49,7 @@ class FlowerClient(fl.client.NumPyClient):
                 if self.config.prox_lambda > 0:
                     proximal_term = 0.0
                     for local_weights, global_weights in zip(self.net.parameters(), global_params):
-                        proximal_term += (local_weights - global_weights).norm(2)**2
+                        proximal_term += torch.sum((local_weights - global_weights)**2)
                                 
                     loss = criterion(output, labels) + (self.config.prox_lambda / 2) * proximal_term
                 else:

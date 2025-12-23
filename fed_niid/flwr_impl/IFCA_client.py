@@ -134,7 +134,7 @@ class FlowerClient(fl.client.NumPyClient):
         # should return loss, num_examples used for evaluation and metrics
 
         val_data = self.get_round_val_data(config["server_round"])
-        val_loader = DataLoader(val_data, batch_size=min(self.config.client_bs, self.val_slice_idx))
+        val_loader = DataLoader(val_data, batch_size=min(self.config.client_bs, self.val_slice_idx), shuffle=False)
 
         k_clusters = int(config['k_clusters'])
         layers_per_model = int(config['layers_per_model'])

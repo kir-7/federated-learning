@@ -1,5 +1,12 @@
 import flwr as fl
-from flwr.common import ndarrays_to_parameters, Context
+from flwr.common import (
+    Parameters,
+    FitRes,
+    ndarrays_to_parameters,
+    parameters_to_ndarrays,
+    Code,
+    Context
+)
 
 from flwr_datasets import FederatedDataset
 from flwr_datasets.partitioner import NaturalIdPartitioner, PathologicalPartitioner, IidPartitioner
@@ -8,10 +15,13 @@ import torch
 from dataclasses import dataclass
 from torchvision import datasets, transforms
 import numpy as np
+from torch.utils.data import ConcatDataset, DataLoader, Subset
+import random
 
-from ema_strategy import FlowerStrategy
-from client import FlowerClient
-from models import MNISTModel, CIFAR10Model 
+from avg_strategy import FlowerStrategy
+from data_drift_client import FlowerClient
+
+from models import MNISTModel, CIFAR10Model
 from data_utils import SimpleDataset, FlwrMNISTDataset
 
 @dataclass
@@ -21,15 +31,17 @@ class FedConfig:
 
     sampling_method: str = 'dirichlet'
     dirichlet_alpha: float = 0.3
+    num_classes_per_partition:int = 3
     dataset: str = "cifar10"
+    partition_column:str = 'label'
     n_classes : int = 10
     model : str = 'mnist'
+    k_clusters : int = 3
 
-    algorithm : str = 'fedavg'
+    algorithm : str = 'fed_g_prox'
     prox_lambda : float = 0.25
     k_neighbours : float = 0.4
     ema_alpha : float = 0.75
-    num_clusters : int = 3
 
     client_bs: int = 32
     global_bs: int = 32
@@ -46,61 +58,70 @@ class FedConfig:
     np_seed: int = 43
     rand_seed : int = 44
 
-    init_data_usage : float = 1.0
-    data_drift_every : int = 11
+    init_data_usage : float = 0.5
+    data_drift_every : int = 15
 
     verbose: bool = True
     note: str = "Notes"
 
 config = FedConfig(
-    n_clients=10,
-    m=1,
-    model='cnn',
-    
-    dataset='cifar10',
+    n_clients=40,
     n_classes=10,
+    client_lr=1e-3,
+    dataset='cifar10',
+    partition_column='label',
     sampling_method='pathological',
-    dirichlet_alpha=0.5,
-    
-    algorithm="ifca",
+
     k_neighbours = 0.4,
-    prox_lambda = 0.001,
+    k_clusters=4,
+    prox_lambda = 0,
     ema_alpha=0.99,
-    num_clusters=3,
-    
-    global_rounds=30,
-    client_epochs=3,
+    algorithm="fed_sim_cl",
+
+    dirichlet_alpha=0.5,
+    num_classes_per_partition=3,
+    model='cnn',
+    m=0.3,
+    global_rounds=50,
+    client_epochs=4,
     client_bs=64,
     global_bs=128,
-    client_lr=1e-3,
-    
-    init_data_usage=0.5,
-    data_drift_every=10,
+
+    init_data_usage=1.0,
+    data_drift_every=31,
 
     verbose=True,
 
-    note="IFCA algorithm, with num clusters=3, using init_data_usage with 0.5 with data being increased every 10 rounds, this doesn't use proximal loss term"
+    note="experiment 1.4 of varying NonIIDness: fed Sim CL algorithm, 40 clients and 30% participation and pathelogical sampling with num_classes_per_partition=3 and k_clusters=4 and NO data drift. evaluated every 5 rounds"
 )
-
 
 torch.manual_seed(config.torch_seed)
 np.random.seed(config.np_seed)
+random.seed(config.rand_seed)
 
 fds = FederatedDataset(
     dataset=config.dataset,
     partitioners={
         "train": PathologicalPartitioner(
-            partition_by="label",
+            partition_by=config.partition_column,
             num_partitions=config.n_clients,
-            num_classes_per_partition=4,
-            class_assignment_mode="first-deterministic"
+            num_classes_per_partition=config.num_classes_per_partition,
+            class_assignment_mode="first-deterministic",
+            seed=config.rand_seed
         )
     }
 )
 
+if config.dataset == 'cifar100' or config.dataset == 'cifar10':
+    mean = (0.4914, 0.4822, 0.4465)
+    std = (0.2023, 0.1994, 0.2010)
+elif config.dataset == 'mnist':
+    mean = (0.1307, )
+    std = (0.3081, )
+
 cifar_transform = transforms.Compose([
     transforms.ToTensor(),
-    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)) if config.dataset == 'cifar10'  else transforms.Normalize((0.1307, ), (0.3081, ))
+    transforms.Normalize(mean, std),
 ])
 
 client_train_partitions = {}
@@ -112,12 +133,26 @@ for client_id in range(config.n_clients):
 
     split_dataset = partition.train_test_split(train_size=config.train_test_split, seed=config.np_seed)
 
-    client_train_partitions[client_id] = FlwrMNISTDataset(
+    train_dataset = FlwrMNISTDataset(
         split_dataset['train'], client_id, transform=cifar_transform
     )
-    client_test_partitions[client_id] = FlwrMNISTDataset(
+
+    val_dataset = FlwrMNISTDataset(
         split_dataset['test'], client_id, transform=cifar_transform
     )
+
+    train_labels = [sample['label'] for sample in train_dataset]
+    val_labels = [sample['label'] for sample in val_dataset]
+
+    train_sorted = torch.argsort(torch.Tensor(train_labels)).tolist()
+    val_sorted = torch.argsort(torch.Tensor(val_labels)).tolist()
+
+    sorted_train_dataset = Subset(train_dataset, train_sorted)
+    sorted_val_dataset = Subset(val_dataset, val_sorted)
+
+    client_train_partitions[client_id] = sorted_train_dataset
+    client_test_partitions[client_id] = sorted_val_dataset
+
 
 def client_fn(context : Context):
 
@@ -126,31 +161,40 @@ def client_fn(context : Context):
     train_dataset = client_train_partitions[int(cid)]
     test_dataset = client_test_partitions[int(cid)]
 
-    model = CIFAR10Model(n_classes=10)
+    model = CIFAR10Model(n_classes=config.n_classes)
 
     return FlowerClient(cid, model, train_dataset, test_dataset, config).to_client()
 
+
 if __name__ == "__main__":
 
-    # 2. Create Initial Parameters
+    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    NUM_CPUS_PER_CLIENT = 1
+    NUM_GPUS_PER_CLIENT = 0.15
+
     initial_net = CIFAR10Model(n_classes=10)
     initial_params = ndarrays_to_parameters(
         [val.cpu().numpy() for _, val in initial_net.state_dict().items()]
     )
 
-    # 3. Define Strategy
     strategy = FlowerStrategy(
         num_clients=config.n_clients,
         initial_parameters=initial_params,
-        k_neighbours=config.k_neighbours,
         fraction_fit=config.m,
+        fraction_evaluate=1.0,
+        evaluate_frequency=5,
+        total_rounds=config.global_rounds,
+        # start_knn=5,
+        # k_neighbours=config.k_neighbours
+        k_clusters=config.k_clusters
     )
 
-    # 4. Start Simulation
-    fl.simulation.start_simulation(
-        client_fn=client_fn,
-        num_clients=config.n_clients,
-        config=fl.server.ServerConfig(num_rounds=config.global_rounds),
-        strategy=strategy,
-        client_resources={"num_cpus": 1, "num_gpus": 1 if torch.cuda.is_available() else 0}
-    )
+
+    history = fl.simulation.start_simulation(
+    client_fn=client_fn,
+    num_clients=config.n_clients,
+    config=fl.server.ServerConfig(num_rounds=config.global_rounds),
+    strategy=strategy,
+    client_resources={"num_cpus": NUM_CPUS_PER_CLIENT, "num_gpus":NUM_GPUS_PER_CLIENT},
+    ray_init_args={"log_to_driver": True, "include_dashboard": False}
+)

@@ -2,6 +2,8 @@ import flwr as fl
 import torch
 from torch.utils.data import DataLoader, Subset
 from sklearn.metrics import precision_recall_fscore_support
+import copy
+
 class FlowerClient(fl.client.NumPyClient):
     def __init__(self, cid, net, train_dataset, val_dataset, config):
         self.cid = cid
@@ -78,7 +80,12 @@ class FlowerClient(fl.client.NumPyClient):
 
         train_loader = DataLoader(train_data, batch_size=min(self.config.client_bs, self.train_slice_idx), shuffle=True)
 
-        global_params = [torch.tensor(p).to(self.device) for p in parameters]
+        if self.config.prox_lambda > 0:
+            global_model = copy.deepcopy(self.net)        
+            global_model.eval()
+            for param in global_model.parameters():
+                param.requires_grad = False
+
         self.net.train()
 
         lr = self.get_lr(config['server_round'])
@@ -97,8 +104,8 @@ class FlowerClient(fl.client.NumPyClient):
                 # proximal loss coefficient controls between fedavg and fedprox
                 if self.config.prox_lambda > 0:
                     proximal_term = 0.0
-                    for local_weights, global_weights in zip(self.net.parameters(), global_params):
-                        proximal_term += (local_weights - global_weights).norm(2)**2
+                    for local_weights, global_weights in zip(self.net.parameters(), global_model.parameters()):
+                        proximal_term += torch.sum((local_weights - global_weights)**2)
                                 
                     loss = criterion(output, labels) + (self.config.prox_lambda / 2) * proximal_term
                 else:
@@ -118,7 +125,7 @@ class FlowerClient(fl.client.NumPyClient):
         self.set_parameters(parameters)
 
         val_data = self.get_round_val_data(config["server_round"])
-        val_loader = DataLoader(val_data, batch_size=min(self.config.client_bs, self.val_slice_idx))
+        val_loader = DataLoader(val_data, batch_size=min(self.config.client_bs, self.val_slice_idx), shuffle=False)
 
         self.net.eval()
         correct, total = 0, 0

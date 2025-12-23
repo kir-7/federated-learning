@@ -234,7 +234,7 @@ class FlowerStrategy(fl.server.strategy.Strategy):
 
             for i, (nei, similarity) in enumerate(candidates):
                 if  server_round < self.start_knn:
-                    similarities[(client_a, nei)] = similarity
+                    similarities[(client_a, nei)] = 1  # use 1 if warm up is fedavg similarity of warm up sim weighted avg
                 elif i <= self.topk:
                     similarities[(client_a, nei)] = similarity
                 else:

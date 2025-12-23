@@ -30,7 +30,7 @@ class SimpleDataset(torch.utils.data.Dataset):
         sample = {'img':x, 'label':y}
         return sample
 
-class FlwrMNISTDataset(torch.utils.data.Dataset):
+class FlwrDataset(torch.utils.data.Dataset):
     def __init__(self, data, client_id, transform=None):
         super().__init__()
         self.client_id = client_id
@@ -43,7 +43,11 @@ class FlwrMNISTDataset(torch.utils.data.Dataset):
     def __getitem__(self, index):
         raw_item = self.data[index]
 
-        if isinstance(raw_item, (tuple, list)):
+        if isinstance(raw_item, dict) and "writer_id" in raw_item:   # femnist
+            x = raw_item['image']
+            y = raw_item['character']
+
+        elif isinstance(raw_item, (tuple, list)):
             x, y = raw_item
         else:            
             x = raw_item['img']

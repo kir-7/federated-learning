@@ -28,7 +28,7 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         fraction_fit: float = 1.0,
         fraction_evaluate:float =1.0,
         evaluate_frequency:int=4,
-        total_round:int=40,
+        total_rounds:int=40,
         global_dataset=None,
         global_bs=None,
     ):
@@ -37,7 +37,7 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         self.fraction_evaluate = fraction_evaluate
         self.k_clusters = k_clusters
         self.evaluate_freq = evaluate_frequency
-        self.total_rounds = total_round
+        self.total_rounds = total_rounds
 
         if global_dataset and global_bs:
             self.global_dataset = global_dataset
