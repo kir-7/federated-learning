@@ -169,11 +169,13 @@ def plot_compare_experiments(filepaths, save_path=None):
 if __name__ == "__main__":
     # Define your files here
     files_to_compare = [
-        "experiments\exp3 m=30 patho 3 data drift\exp3_cifar10_fedavg_nc_40_m_30_data_drift.pkl",
-        "experiments\exp3 m=30 patho 3 data drift\exp3_cifar10_fedprox_nc_40_m_30_data_drift.pkl",
-        "experiments\exp3 m=30 patho 3 data drift\exp3_cifar10_fedknn_nc_40_m_30_data_drift.pkl",
-        "experiments\exp3 m=30 patho 3 data drift\exp3_cifar10_ifca_nc_40_m_30_data_drift.pkl",
+        r"experiments\femnist exps\exp 5 nc 20 m 30 data drift\exp5_femnist_fedavg_nc_20_m_30_data_drift.pkl",
+        r"experiments\femnist exps\exp 5 nc 20 m 30 data drift\exp5_femnist_fedknn_nc_20_m_30_data_drift_start_knn_avg.pkl",
+        r"experiments\femnist exps\exp 5 nc 20 m 30 data drift\exp5_femnist_fedknn_nc_20_m_30_data_drift_start_knn_sim.pkl",
+        r"experiments\femnist exps\exp 5 nc 20 m 30 data drift\exp5_femnist_fedprox_nc_20_m_30_data_drift.pkl",
+        r"experiments\femnist exps\exp 5 nc 20 m 30 data drift\exp5_femnist_ifca_nc_20_m_30_data_drift.pkl",
+        
         
     ]
     
-    plot_compare_experiments(files_to_compare, save_path="plots/experiment3_noniid_data_drift_perf.png")
+    plot_compare_experiments(files_to_compare, save_path="plots/experiment5_femnist_noniid_data_dirft_perf.png")

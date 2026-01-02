@@ -31,6 +31,7 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         evaluate_frequency:int=5,
         total_rounds:int=30,
         start_knn:int=5,
+        init_strat='sim'
     ):
         self.num_clients = num_clients
         self.sigma_threshold = sigma_threshold
@@ -40,7 +41,8 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         self.start_knn = start_knn
         self.evaluate_freq = evaluate_frequency
         self.total_rounds = total_rounds
- 
+        self.init_strat = init_strat
+
         self.topk = max(1, int(k_neighbours * num_clients))
        
         if global_dataset and global_bs:
@@ -234,7 +236,7 @@ class FlowerStrategy(fl.server.strategy.Strategy):
 
             for i, (nei, similarity) in enumerate(candidates):
                 if  server_round < self.start_knn:
-                    similarities[(client_a, nei)] = 1  # use 1 if warm up is fedavg similarity of warm up sim weighted avg
+                    similarities[(client_a, nei)] = similarity if self.init_strat =='sim' else 1 # use 1 if warm up is fedavg similarity of warm up sim weighted avg
                 elif i <= self.topk:
                     similarities[(client_a, nei)] = similarity
                 else:
