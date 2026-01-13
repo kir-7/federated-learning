@@ -115,7 +115,7 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         active_cids = list(client_weights.keys())
 
         distances = self.calculate_pairwise_distances(client_weights, active_cids)
-        similarities = self.get_topk_similarities(server_round, distances, active_cids)
+        similarities, sigma = self.get_topk_similarities(server_round, distances, active_cids)
         
         for node_cid in active_cids:
             for nei_cid in active_cids:
@@ -128,7 +128,12 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         for client_cid, neighbors in to_aggregate.items():
             self.client_models[client_cid] = self.similarity_aggregate(neighbors)
         
-        metrics = {"avg_train_loss": sum(loss_aggregated) / len(loss_aggregated), "similarity_scores": similarities}
+        # calculate KNN distances to find lyapunov energy
+        cummulative_distances = self.get_topk_cummulative_distances(active_cids, similarities, sigma)
+        
+        energy_value = (sum(loss_aggregated) / len(loss_aggregated)) + cummulative_distances
+
+        metrics = {"avg_train_loss": sum(loss_aggregated) / len(loss_aggregated), "similarity_scores": similarities, "Lyapunov_Energy _E":energy_value, "cummulative_distances":cummulative_distances}
 
         return ndarrays_to_parameters(self.client_models[active_cids[0]]), metrics
 
@@ -159,6 +164,7 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         
         else:
             return []
+        
     def aggregate_evaluate(
         self,
         server_round: int,
@@ -242,7 +248,7 @@ class FlowerStrategy(fl.server.strategy.Strategy):
                 else:
                     similarities[(client_a, nei)] = 0
         
-        return similarities
+        return similarities, sigma
 
     def calculate_pairwise_distances(self, client_weights : Dict[int, Tuple[NDArrays, int]], active_cids) -> Dict[Tuple[int, int], float]:
 
@@ -274,6 +280,26 @@ class FlowerStrategy(fl.server.strategy.Strategy):
         ]
         return weights_prime
 
+    def get_topk_cummulative_distances(self, active_cids, similarities, sigma):
+        
+        cummulative_distances = 0
+        adj = defaultdict(list)
+        for (u, v), weight in similarities.items():
+            adj[u].append((v, weight))
+            adj[v].append((u, weight))
+
+        for node in active_cids:
+            # Sort neighbors of 'node' by weight descending
+            neighbors = adj[node]
+            neighbors.sort(key=lambda x: x[1], reverse=True)
+            
+            # Take top k
+            for nei, weight in neighbors[:self.topk]:
+                # get the distance between node and this neighbour
+                cummulative_distances += -np.log(weight) * sigma
+        
+        return cummulative_distances
+
     def get_final_similarities(self, server_round):
         '''
         Use self.client models to obtain final pairwise similarity scores to construct the final client graph
@@ -289,22 +315,20 @@ class FlowerStrategy(fl.server.strategy.Strategy):
     def construct_final_client_graph(self, filename=None):
         
         import networkx as nx
+        from networkx.algorithms import community
         import matplotlib.pyplot as plt
 
-        similarities = self.get_final_similarities(self.total_rounds + 1)
+        similarities, sigma = self.get_final_similarities(self.total_rounds + 1)
 
-        fig, ax = plt.subplots(figsize=(8, 8))
-    
         all_node_names = set()
         for u, v in similarities.keys():
             all_node_names.update([u, v])
-    
+
         nodes_id = {name: i for i, name in enumerate(sorted(all_node_names))}
         all_node_ids = list(nodes_id.values())
 
         G = nx.Graph()
         G.add_nodes_from(all_node_ids)
-        pos = nx.spring_layout(G, seed=42, k=4) 
 
         adj = defaultdict(list)
         for (u, v), weight in similarities.items():
@@ -314,34 +338,41 @@ class FlowerStrategy(fl.server.strategy.Strategy):
 
         knn_edges = set()
         for node in all_node_ids:
-            # Sort neighbors of 'node' by weight descending
             neighbors = adj[node]
             neighbors.sort(key=lambda x: x[1], reverse=True)
             
-            # Take top k
-            for neighbor_id, weight in neighbors[:k]:
-                # Use a sorted tuple to ensure undirected edges (u,v) == (v,u)
+            for neighbor_id, weight in neighbors[:self.topk]:
                 edge = tuple(sorted((node, neighbor_id)))
                 knn_edges.add((edge, weight))
 
         for (u_id, v_id), weight in knn_edges:
-            G.add_edge(u_id, v_id, weight=weight)
-            
-        if G.edges():
-            raw_weights = [G[u][v]['weight'] for u, v in G.edges()]
-            max_w = max(raw_weights) if raw_weights else 1
-            draw_widths = [(w / max_w) * 5 for w in raw_weights]
-        else:
-            draw_widths = []
+            G.add_edge(u_id, v_id, weight=weight)               
 
-        nx.draw_networkx_nodes(G, pos, ax=ax, node_color='skyblue', node_size=300, edgecolors='black')
-        nx.draw_networkx_labels(G, pos, ax=ax, font_size=8)
-        nx.draw_networkx_edges(G, pos, ax=ax, width=draw_widths, edge_color='black', alpha=0.5)
-        
-        ax.set_title(f"Final Client Graph - Time Step: {self.total_rounds}\n(Top k={self.topk} neighbors per node)")
-        ax.axis('off')
+        communities = community.greedy_modularity_communities(G)
+        community_map = {}
+        for i, comm in enumerate(communities):
+            for node in comm:
+                community_map[node] = i
 
+        pos = nx.spring_layout(G, k=1/np.sqrt(len(G.nodes())), iterations=50, seed=42)
+
+
+        num_communities = len(communities)
+        colors = plt.cm.Set3(np.linspace(0, 1, num_communities))
+        node_colors = [colors[community_map[node]] for node in G.nodes()]
+
+        plt.figure(figsize=(14, 10))
+        nx.draw_networkx_edges(G, pos, alpha=0.2, width=1)
+        nx.draw_networkx_nodes(G, pos, node_color=node_colors, 
+                            node_size=500, alpha=0.9, 
+                            edgecolors='black', linewidths=1.5)
+        nx.draw_networkx_labels(G, pos, font_size=10, font_weight='bold')
+
+        plt.title(f"Final Client Graph - Time Step: {self.total_rounds}\n(Top k={self.topk} neighbors per node)")
+        plt.axis('off')
+        plt.tight_layout()
+    
         if filename:
             plt.savefig(filename,  bbox_inches='tight', dpi=300)
-        
+    
         plt.show()
